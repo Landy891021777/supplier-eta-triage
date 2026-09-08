@@ -318,31 +318,79 @@ def _email_semi(po, new_eta, reason, orig) -> tuple[str, str, str]:
     return f"Re: {po} schedule update", body, "confirmed"
 
 
-def _email_narrative(po, new_eta, reason, orig) -> tuple[str, str, str]:
+def _month_end(d: date) -> date:
+    nxt = date(d.year + (d.month == 12), (d.month % 12) + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+def _email_narrative(po, new_eta, reason, orig, as_of: date) -> tuple[str, str, str, date]:
     """
     純敘述、相對日期、模糊措辭 —— 規則層基本上會失敗。
     這一群就是「為什麼需要 LLM」的證據來源。
+
+    ★ 標準答案必須從信件文字可還原 ★
+
+        本函式回傳「實際的正確日期」，而不是外部傳進來的 new_eta。
+
+        原因是一個真實踩過的坑：早期版本讓信裡寫「往後抓個兩週」，
+        但標準答案存的是精確天數（例如 10 天）。那個日期根本無法從
+        文字還原 —— 等於在考一道沒有答案的題目，任何模型都會得零分，
+        而那個零分會被誤讀成「LLM 不會算相對日期」。
+
+        同理，承諾強度也必須由信中實際使用的措辭決定，
+        不能隨機貼標籤。標準答案若與文字脫鉤，整個實驗就失去意義。
+
+    這件事比它看起來重要：**評估資料的瑕疵會產生錯誤的技術結論**，
+    而錯誤的技術結論會讓人做出錯誤的架構決定。
     """
-    delta = (new_eta - orig).days
-    weeks = max(1, round(delta / 7))
-    phrasing = random.choice([
-        f"we may need roughly {weeks} more week(s) beyond the original date",
-        f"大概要再往後 {weeks} 週左右",
-        "it will likely slip to around the middle of next month",
-        "恐怕要到下個月底才有辦法",
-    ])
-    hedge = random.choice([
-        "I will confirm once我們生管回覆",
-        "but this is not locked yet",
-        "還要再跟工廠確認",
-        "pending final confirmation",
-    ])
+    # 「下個月中／下個月底」是相對於「寫信當下」，不是相對於原承諾日 ——
+    # 這是人講話的方式。因此只有在原承諾日離現在夠近時才用這種說法，
+    # 否則推算出來的日期會早於原承諾日，語意不通。
+    modes = ["weeks"]
+    if 0 <= (orig - as_of).days <= 25:
+        modes += ["mid_next_month", "end_next_month"]
+    mode = random.choice(modes)
+    if mode == "weeks":
+        weeks = max(1, round((new_eta - orig).days / 7))
+        actual = orig + timedelta(weeks=weeks)
+        phrasing = random.choice([
+            f"we may need roughly {weeks} more week(s) beyond the original date",
+            f"大概要再往後 {weeks} 週左右",
+        ])
+    elif mode == "mid_next_month":
+        actual = date(as_of.year + (as_of.month == 12), (as_of.month % 12) + 1, 15)
+        phrasing = random.choice([
+            "it will likely slip to around the middle of next month",
+            "大概要到下個月中",
+        ])
+    else:
+        actual = _month_end(date(as_of.year + (as_of.month == 12),
+                                 (as_of.month % 12) + 1, 1))
+        phrasing = random.choice([
+            "we are looking at the end of next month at the earliest",
+            "恐怕要到下個月底才有辦法",
+        ])
+
+    # 承諾強度由措辭決定，不是隨機指定。
+    #   soft = 給了日期但明說沒鎖定 -> estimated
+    #   hard = 明確表示無法承諾     -> intent_only
+    if random.random() < 0.5:
+        hedge = random.choice(["but this is not locked yet",
+                               "pending final confirmation",
+                               "這個日期還沒鎖定"])
+        strength = "estimated"
+    else:
+        hedge = random.choice(["I cannot commit a firm date at this point",
+                               "我沒辦法給你確定的日期，還要再跟工廠確認",
+                               "we are unable to commit at this stage"])
+        strength = "intent_only"
+
     body = (
         "Hi,\n\n"
         f"About {po} — because of {REASON_TEXT_EN[reason]}, {phrasing}. {hedge}.\n"
         "Sorry for the inconvenience.\n\nRgds"
     )
-    return f"RE: {po}", body, random.choice(["estimated", "intent_only"])
+    return f"RE: {po}", body, strength, actual
 
 
 def _email_no_change(po, orig) -> tuple[str, str, str]:
@@ -388,8 +436,14 @@ def build_emails(pos: list[dict], n: int, as_of: date) -> tuple[list[dict], list
             delay = random.choices([3, 7, 10, 14, 21, 30, 45],
                                    weights=[.18, .22, .18, .17, .13, .08, .04])[0]
             new_eta_d = orig + timedelta(days=delay)
-            fn = {"formal": _email_formal, "semi": _email_semi, "narrative": _email_narrative}[style]
-            subj, body, strength = fn(po["po_no"], new_eta_d, reason, orig)
+            if style == "narrative":
+                # narrative 會依實際措辭重新推算日期並回傳，
+                # 確保標準答案是「從信件文字可還原」的那個日期。
+                subj, body, strength, new_eta_d = _email_narrative(
+                    po["po_no"], new_eta_d, reason, orig, as_of)
+            else:
+                fn = {"formal": _email_formal, "semi": _email_semi}[style]
+                subj, body, strength = fn(po["po_no"], new_eta_d, reason, orig)
             new_eta, ctype = new_eta_d.isoformat(), "delay"
 
         eid = f"GEN-{i+1:03d}"
