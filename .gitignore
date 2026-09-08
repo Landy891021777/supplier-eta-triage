@@ -1,0 +1,27 @@
+# ---- 機密：API 金鑰絕不進版控 ----
+.env
+.env.local
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 產出物（可由程式重新生成，不需版控）
+output/
+data/*.csv
+data/inbox/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 個人面試準備筆記，不進版控
+面試防彈說法.md
+
+# 本機開發工具設定
+.claude/
