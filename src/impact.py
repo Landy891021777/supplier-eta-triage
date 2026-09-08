@@ -44,6 +44,25 @@ def _d(v) -> date | None:
         return None
 
 
+def _clean_str(v) -> str:
+    """
+    把「空值」正規化成空字串。
+
+    這個函式是因為一個真實的 bug 而生的：料號主檔的「替代料」欄位在
+    CSV 裡是空字串，用 pandas 讀進來會變成 float NaN。
+    而 `str(NaN)` 等於字串 "nan" —— 它是非空字串，於是通過了
+    `if alt:` 的檢查，工具就對著生管說「有替代料 nan 可評估」，
+    並因此把影響分數往下調。
+
+    對使用者而言這是雙重傷害：畫面上出現看不懂的字，而且優先序被算錯。
+    空值處理在資料型工具裡不是細節，是正確性問題。
+    """
+    if v is None or v != v:  # None 或 NaN
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() in {"nan", "none", "nat", "null", "-"} else s
+
+
 def _band(value: float, bands: list[tuple[float, float]]) -> float:
     """bands = [(上界, 分數), ...]，由小到大；超過最後一個上界則取最後的分數。"""
     for upper, score in bands:
@@ -248,7 +267,7 @@ def rule_substitutability(ctx: dict) -> Rule:
     緩不濟急。它是「最後一張牌」而非日常手段 ——
     這也是為什麼它的權重遠低於規則 3 的二源。
     """
-    alt = str(ctx["material"].get("alt_material_id") or "").strip()
+    alt = _clean_str(ctx["material"].get("alt_material_id"))
     if alt:
         return 0.20, f"有替代料 {alt} 可評估（需工程放行）"
     return 1.00, "無登錄替代料"

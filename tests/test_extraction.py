@@ -184,3 +184,36 @@ def test_pull_in_is_capped():
                     "criticality": "high", "is_bottleneck": True},
                    {}, WEIGHTS, THRESH)
     assert res["impact_score"] <= 40.0
+
+
+# ---------------------------------------------------------------------------
+# 空值處理（回歸測試）
+# ---------------------------------------------------------------------------
+def test_nan_alt_material_is_treated_as_no_alternative():
+    """
+    回歸測試：料號主檔的「替代料」欄位在 CSV 裡是空字串，
+    用 pandas 讀進來會變成 float NaN，而 str(NaN) == "nan" 是非空字串。
+
+    早期版本因此對生管顯示「有替代料 nan 可評估」，
+    並錯誤地把影響分數往下調 —— 畫面出現看不懂的字，優先序也算錯了。
+    """
+    import math
+    from impact import rule_substitutability
+
+    for empty in (float("nan"), None, "", "  ", "NaN", "None"):
+        score, why = rule_substitutability({"material": {"alt_material_id": empty}})
+        assert score == 1.00, f"{empty!r} 應視為無替代料"
+        assert "nan" not in why.lower(), f"理由文字不可出現 nan：{why}"
+
+    score, why = rule_substitutability({"material": {"alt_material_id": "WF-N7-KL2211"}})
+    assert score == 0.20
+    assert "WF-N7-KL2211" in why
+
+
+def test_clean_str_normalises_empty_values():
+    from impact import _clean_str
+
+    assert _clean_str(float("nan")) == ""
+    assert _clean_str(None) == ""
+    assert _clean_str("nan") == ""
+    assert _clean_str("  WF-1  ") == "WF-1"
