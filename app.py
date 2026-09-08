@@ -43,7 +43,23 @@ def load_pipeline(use_llm: bool):
     return pipeline.run(use_llm=use_llm)
 
 
+def _ensure_data() -> None:
+    """
+    首次啟動時自動產生合成資料。
+
+    `data/` 被 .gitignore 排除（它是可重新生成的產物，不該進版控），
+    因此雲端部署後第一次啟動會找不到資料。與其要求使用者先跑一次
+    指令，不如讓工具自己補上 —— 導入的第一步不該卡在環境設定。
+    """
+    if (ROOT / "data" / "po_master.csv").exists():
+        return
+    import generate_data
+    with st.spinner("首次啟動：正在產生合成資料…"):
+        generate_data.main()
+
+
 def main() -> None:
+    _ensure_data()
     cfg = pipeline.load_config()
 
     # ---------------- 側邊欄 ----------------
