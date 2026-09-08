@@ -25,11 +25,35 @@ _VALID_STRENGTH = {c.value for c in CommitmentStrength}
 _VALID_CHANGE = {c.value for c in ChangeType}
 
 
-def build_prompt(email: dict, reference_date: str, known_pos: list[str]) -> str:
-    """組出送給模型的完整 prompt。"""
+def build_prompt(email: dict, reference_date: str,
+                 known_pos: list[str] | list[dict]) -> str:
+    """
+    組出送給模型的完整 prompt。
+
+    `known_pos` 可以是純 PO 號清單，也可以是含情境的字典
+    （po_no / material_id / committed_date / need_date）。
+
+    **帶入原承諾日是必要的，不是錦上添花。**
+    供應商寫「往後抓個兩週」時，信裡並沒有寫原本是哪一天——
+    那個資訊在我方系統裡。不把它給模型，就是在要求模型猜一個
+    它不可能知道的數字，然後把它答不出來當成「LLM 不會算日期」。
+
+    這也是「解析」與「事實」分工的體現：信件提供變化，系統提供基準。
+    """
     template = PROMPT_PATH.read_text(encoding="utf-8")
     # 只帶入該供應商相關的 PO，避免 prompt 過長且降低模型亂配的機會
-    listing = "\n".join(f"- {p}" for p in known_pos[:60]) or "（無）"
+    rows = list(known_pos)[:60]
+    if rows and isinstance(rows[0], dict):
+        body = "\n".join(
+            "| {} | {} | {} | {} |".format(
+                r.get("po_no", ""), r.get("material_id", ""),
+                str(r.get("committed_date", ""))[:10],
+                str(r.get("need_date", ""))[:10])
+            for r in rows)
+        listing = ("| 採購單號 | 料號 | 原承諾日 | 下游需求日 |\n"
+                   "|---|---|---|---|\n" + body)
+    else:
+        listing = "\n".join(f"- {p}" for p in rows) or "（無）"
     email_text = (
         f"Date: {email.get('received_at', '')}\n"
         f"Subject: {email.get('subject', '')}\n\n"

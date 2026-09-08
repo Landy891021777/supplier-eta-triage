@@ -115,7 +115,10 @@ def run_experiment() -> dict:
                      "confidence": rule_conf, **score_email(rule_pred, truth)})
 
         if llm_on:
-            known = pos_df.loc[pos_df["supplier_id"] == e["supplier_id"], "po_no"].tolist()
+            known = pos_df.loc[
+                pos_df["supplier_id"] == e["supplier_id"],
+                ["po_no", "material_id", "committed_date", "need_date"]
+            ].to_dict("records")
             llm_pred, meta = extract_llm.extract(e, ref_date, known, provider)
             rows.append({"group": grp, "layer": "LLM 層", "email_id": e["email_id"],
                          "confidence": (max([p.confidence for p in llm_pred], default=0.0)),

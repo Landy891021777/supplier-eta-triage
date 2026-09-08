@@ -125,8 +125,12 @@ def run(cfg: dict | None = None, use_llm: bool = True,
     traces: list[dict] = []
 
     for email in emails:
-        # 只把該供應商名下的 PO 帶進 prompt，縮短 prompt 並降低錯配機會
-        known = pos_df.loc[pos_df["supplier_id"] == email["supplier_id"], "po_no"].tolist()
+        # 只把該供應商名下的 PO 帶進 prompt，縮短 prompt 並降低錯配機會。
+        # 帶的是完整情境（含原承諾日）而非只有單號 —— 模型要能推算相對日期。
+        known = pos_df.loc[
+            pos_df["supplier_id"] == email["supplier_id"],
+            ["po_no", "material_id", "committed_date", "need_date"]
+        ].to_dict("records")
         records, trace = extract_one(email, cfg, known, provider, use_llm)
         traces.append(trace)
 
