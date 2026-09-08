@@ -25,3 +25,6 @@ Thumbs.db
 
 # 本機開發工具設定
 .claude/
+
+# LLM 回應快取（可重新產生，不進版控）
+.cache/
