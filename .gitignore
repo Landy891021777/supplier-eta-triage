@@ -28,3 +28,6 @@ Thumbs.db
 
 # LLM 回應快取（可重新產生，不進版控）
 .cache/
+
+# 模擬 ERP 資料庫（可由 build_erp_db.py 重新產生）
+data/*.db

@@ -26,6 +26,7 @@ import yaml
 
 import extract_llm
 import extract_rules
+from adapters import get_source
 from domain import ChangeType, CommitmentStrength
 from impact import evaluate
 from llm.provider import get_provider
@@ -40,11 +41,27 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def load_reference_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    pos = pd.read_csv(DATA / "po_master.csv", encoding="utf-8-sig")
-    mats = pd.read_csv(DATA / "materials.csv", encoding="utf-8-sig")
-    sups = pd.read_csv(DATA / "suppliers.csv", encoding="utf-8-sig")
-    return pos, mats, sups
+def get_data_source(cfg: dict | None = None):
+    """
+    依設定建立資料來源。
+
+    刻意不在這裡做「找不到就退回 CSV」的容錯 ——
+    使用者以為在讀 ERP、實際卻在讀 CSV，是最糟的失敗方式。
+    寧可大聲失敗。
+    """
+    cfg = cfg or load_config()
+    source = get_source(cfg.get("data_source", "csv"))
+    problems = source.validate()
+    if problems:
+        raise ValueError(
+            f"資料來源 '{source.name}' 不符合資料合約：" + "；".join(problems))
+    return source
+
+
+def load_reference_data(cfg: dict | None = None):
+    """回傳 (採購單, 料號主檔, 供應商主檔)。來源由 config.yaml 決定。"""
+    src = get_data_source(cfg)
+    return src.purchase_orders(), src.materials(), src.suppliers()
 
 
 def load_emails() -> list[dict]:
@@ -112,7 +129,9 @@ def run(cfg: dict | None = None, use_llm: bool = True,
     thresholds = cfg["priority_thresholds"]
     as_of = date.fromisoformat(cfg["data_generation"]["as_of_date"])
 
-    pos_df, mats_df, sups_df = load_reference_data()
+    source = get_data_source(cfg)
+    pos_df, mats_df, sups_df = (source.purchase_orders(), source.materials(),
+                                source.suppliers())
     emails = load_emails()
     po_index = pos_df.set_index("po_no").to_dict("index")
     mat_index = mats_df.set_index("material_id").to_dict("index")
@@ -213,7 +232,8 @@ def run(cfg: dict | None = None, use_llm: bool = True,
     df = pd.DataFrame(rows)
     if df.empty:
         return {"actions": df, "traces": pd.DataFrame(traces),
-                "llm_available": llm_available, "stats": {}, "as_of": as_of}
+                "llm_available": llm_available, "stats": {}, "as_of": as_of,
+                "data_source": source.describe()}
 
     # ---- 去重：同一張 PO 被多封信提到時，以最新一封為準 ----
     # （對應手寫案例 HC-001 / HC-009：同一天內供應商又補了一封確認信）
@@ -242,7 +262,8 @@ def run(cfg: dict | None = None, use_llm: bool = True,
     }
 
     return {"actions": actionable, "all": df, "traces": pd.DataFrame(traces),
-            "llm_available": llm_available, "stats": stats, "as_of": as_of}
+            "llm_available": llm_available, "stats": stats, "as_of": as_of,
+            "data_source": source.describe()}
 
 
 def rescore(df: pd.DataFrame, weights: dict, thresholds: dict) -> pd.DataFrame:

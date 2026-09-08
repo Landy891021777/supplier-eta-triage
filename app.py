@@ -78,6 +78,9 @@ def main() -> None:
     use_llm = st.sidebar.toggle("啟用 LLM 升級解析", value=provider.available,
                                 disabled=not provider.available)
 
+    # 使用者有權知道畫面上的數字是從哪裡來的。
+    st.sidebar.caption(f"**資料來源**：{pipeline.get_data_source(cfg).describe()}")
+
     st.sidebar.divider()
     st.sidebar.subheader("① 影響評估權重")
     st.sidebar.caption(
@@ -302,6 +305,35 @@ def main() -> None:
                 "目前無 LLM 金鑰，因此所有被升級的信件都退回規則層結果，"
                 "並在行動清單中標示為需人工確認。這是刻意設計的降級行為："
                 "工具寧可承認自己看不懂，也不能猜一個日期給生管。")
+        src = pipeline.get_data_source(cfg)
+        if hasattr(src, "table_counts"):
+            with st.expander("📚 資料來源：模擬 ERP 資料表結構（點開看）"):
+                st.markdown(
+                    "工具讀的不是一張扁平表，而是一組結構貼近 SAP MM 的關聯式資料表。"
+                    "**承諾日、改期次數、有無二源這些欄位在 ERP 裡都不是現成的一欄**，"
+                    "必須用 SQL JOIN 推導出來 —— 這才是接 ERP 時真正要面對的工作。")
+                counts = src.table_counts()
+                sap = {
+                    "vendor_master": "供應商主檔 ≈ LFA1",
+                    "material_master": "物料主檔 ≈ MARA/MARC",
+                    "material_alternate": "替代料關係",
+                    "source_list": "來源清單 ≈ EORD（有無二源的來源）",
+                    "purchase_req": "請購單 ≈ EBAN（需求日的來源）",
+                    "po_header": "採購單頭 ≈ EKKO",
+                    "po_item": "採購單項次 ≈ EKPO",
+                    "po_schedule": "交貨排程行 ≈ EKET（承諾日的來源）",
+                    "po_change_log": "變更文件 ≈ CDHDR/CDPOS（改期次數的來源）",
+                    "goods_receipt": "收貨紀錄 ≈ MKPF/MSEG（未來校準權重的 outcome）",
+                }
+                st.dataframe(
+                    pd.DataFrame([{"資料表": t, "筆數": c, "對應（SAP 為例）": sap.get(t, "")}
+                                  for t, c in counts.items()]),
+                    use_container_width=True, hide_index=True)
+                st.caption(
+                    "`goods_receipt` 刻意為空：它代表工具上線後才會累積的真實結果，"
+                    "也是未來用資料校準規則權重的唯一來源。"
+                    "表名與結構是參考公開資料整理的近似版本，非任何公司的真實 schema。")
+
         st.dataframe(
             tr.rename(columns={
                 "email_id": "信件", "rule_confidence": "規則層信心",

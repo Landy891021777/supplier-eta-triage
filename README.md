@@ -296,13 +296,59 @@ narrative 群一度兩層都是 0.000。原因是信裡寫「往後抓個兩週�
 
 ---
 
+## 六之二、ERP 整合設計
+
+工具需要的十個判斷輸入裡，**有五個在 ERP 中不存在現成欄位**：
+
+| 工具需要的 | ERP 裡的實際樣子 |
+|---|---|
+| 供應商承諾日 | 不在採購單頭，在**交貨排程行** |
+| 下游需求日 | 不在採購單，在**請購單** |
+| 已改期幾次 | **沒有這一欄**，要 COUNT 變更文件 |
+| 有無已認證二源 | **不是布林欄位**，要數來源清單的合格供應商家數 |
+| 本單佔當期需求比例 | **沒有這一欄**，要拿請購單的當期需求量當分母 |
+
+把這些直接寫成一張扁平 CSV，等於跳過了整合工作中最花時間的部分。
+因此本專案建了一個**結構貼近 SAP MM 的模擬 ERP 資料庫**
+（`src/build_erp_db.py`，SQLite，Python 內建零安裝），
+強迫自己用真正的 SQL JOIN 面對這件事：
+
+```
+vendor_master (≈LFA1)  material_master (≈MARA/MARC)  material_alternate
+source_list (≈EORD)    purchase_req (≈EBAN)          po_header (≈EKKO)
+po_item (≈EKPO)        po_schedule (≈EKET)           po_change_log (≈CDHDR/CDPOS)
+goods_receipt (≈MKPF/MSEG)
+```
+
+資料來源以 `config.yaml` 的 `data_source` 切換（`csv` / `sqlite`），
+規則、評分、介面完全不受影響。**真要接公司 ERP 時，只需在
+`src/adapters/` 新增一個 `DataSource` 子類別。**
+
+`tests/test_adapters.py` 驗證兩條路徑推導出的結果一致 ——
+這是接真實 ERP 時最容易出錯、卻最難察覺的地方：
+資料照樣跑得出來，只是悄悄地錯。
+
+**ERP 補不起來的缺口**：供應商在系統裡登的日期，跟他在信裡寫
+「大概月底吧，我再跟你確認」，**在 ERP 看起來是同一個日期**。
+ERP 只存結果，不存語氣 —— 而語氣裡藏著這個日期能不能信。
+這是結構上的缺口，也是這個工具不會被 ERP 取代的部分。
+
+完整欄位對應、技術路徑與**必須先跟 IT／生管確認的六個問題**，
+見 [`docs/ERP欄位對應.md`](docs/ERP欄位對應.md)。
+
+（誠實聲明：表名與結構參考公開資料整理，非任何公司真實 schema；
+作者未實際串接過生產環境 ERP。）
+
+---
+
 ## 七、快速開始
 
 ```bash
 pip install -r requirements.txt
 python src/generate_data.py      # 產生合成資料與模擬信件
+python src/build_erp_db.py       # 建立模擬 ERP 資料庫（SQLite）
 python src/evaluate.py           # 執行規則層 vs LLM 對照實驗
-python -m pytest tests -q        # 執行測試（37 項）
+python -m pytest tests -q        # 執行測試（52 項）
 python -m streamlit run app.py   # 啟動介面
 ```
 
@@ -334,12 +380,17 @@ py -X utf8 -m streamlit run app.py
 ## 八、專案結構
 
 ```
-config.yaml                  所有領域參數與權重（不寫死在程式裡）
+config.yaml                  所有領域參數、權重與資料來源設定
 app.py                       Streamlit 介面
 src/
   domain.py                  領域型別與共同語言定義
   generate_data.py           合成資料產生器（含領域假設註解）★
   handcrafted_emails.py      10 封手寫刁鑽案例 + 人工標註答案 ★
+  build_erp_db.py            建立模擬 ERP 資料庫（SQLite）★
+  adapters/
+    base.py                  資料合約與 DataSource 介面 ★
+    csv_source.py            CSV 來源（欄位預先算好，非 ERP 樣貌）
+    sqlite_source.py         模擬 ERP 來源（欄位以 SQL JOIN 推導）★
   extract_rules.py           第 1 層：規則解析器
   extract_llm.py             第 2 層：LLM 解析
   llm/provider.py            provider 抽象（Gemini/OpenAI/Anthropic/降級）
@@ -354,6 +405,7 @@ tests/
   test_llm_layer.py          LLM 層測試（守住開發時踩過的兩個坑）
 docs/操作指引.md              給同仁的操作說明
 docs/設計決策.md              設計取捨與已知限制
+docs/ERP欄位對應.md           ERP 整合的欄位對應與導入設計 ★
 docs/部署指引.md              GitHub 與雲端部署步驟
 ```
 
@@ -370,7 +422,7 @@ docs/部署指引.md              GitHub 與雲端部署步驟
 | **分批交貨** | 只取最晚的一批當新交期 | 實務上很常見，但正確處理需要拆分採購單行項目，涉及 ERP 資料結構 |
 | **封測段 / 載板段專屬規則** | 只有欄位，未實作規則 | 作者實務在 wafer 段，那兩段的判斷沒有把握，不硬寫 |
 | **價格與商務條款** | 完全未處理 | 作者是物料企劃不是採購，階梯價、NRE、長約、匯率沒有實務基礎 |
-| **真實 ERP 串接** | 未實作 | 需要實際的 SAP/ERP 環境與權限 |
+| **真實 ERP 串接** | 已定義資料合約與 adapter 介面，附模擬 ERP 資料庫，但未接過生產系統 | 需要實際環境與權限。欄位對應與待確認事項見 `docs/ERP欄位對應.md` |
 | **信件來源** | 讀取本機文字檔 | 實務上應接 Exchange/Graph API 或 IMAP |
 | **供應商評鑑累積** | 未實作 | 規則 9 的通知時機資料長期累積後可作為評鑑依據，值得做但不在本版 |
 | **LLM 輸出的一致性** | 未做多次取樣驗證 | 生產環境應加上 self-consistency 或雙模型交叉驗證 |
