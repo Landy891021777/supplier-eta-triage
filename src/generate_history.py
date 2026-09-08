@@ -115,6 +115,32 @@ def _simulate_outcome(rng: random.Random, *, otd_rate: float, category: str,
     return max(1, int(round(base)))
 
 
+def _clear_previous_history(con: sqlite3.Connection) -> None:
+    """
+    先清掉上一次產生的歷史單據，再重新寫入。
+
+    這段是踩坑後補的：原本直接 INSERT，重跑一次就把變更文件寫入第二遍，
+    `po_change_log` 從 904 筆變成 1599 筆，改期次數憑空翻倍
+    （有些單變成「改期 8 次」），權重校準的結果因此每跑一次就不一樣。
+
+    這種 bug 特別惡劣的地方在於：**它不會報錯，資料照樣跑得出來，
+    只是悄悄地錯。** 而且它直接違反專案標榜的「可重現」。
+
+    產生器必須是冪等的 —— 跑一次跟跑十次結果要一樣。
+    歷史單以請購單號前綴 `PR-H` 辨識，那是本程式的專屬命名空間。
+    """
+    hist_pos = [r[0] for r in con.execute(
+        "SELECT DISTINCT po_no FROM po_item WHERE pr_no LIKE 'PR-H%'")]
+    if not hist_pos:
+        return
+    marks = ",".join("?" * len(hist_pos))
+    for table in ("goods_receipt", "po_change_log", "po_schedule",
+                  "po_item", "po_header"):
+        con.execute(f"DELETE FROM {table} WHERE po_no IN ({marks})", hist_pos)
+    con.execute("DELETE FROM purchase_req WHERE pr_no LIKE 'PR-H%'")
+    con.commit()
+
+
 def build_history(verbose: bool = True) -> dict:
     if not DB_PATH.exists():
         raise FileNotFoundError(
@@ -126,6 +152,7 @@ def build_history(verbose: bool = True) -> dict:
 
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    _clear_previous_history(con)
 
     vendors = {r["vendor_id"]: dict(r)
                for r in con.execute("SELECT * FROM vendor_master")}

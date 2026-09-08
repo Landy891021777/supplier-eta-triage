@@ -90,3 +90,50 @@ def test_auc_is_not_suspiciously_perfect():
     res = calibrate.calibrate()
     assert res["auc_model"] < 0.95, (
         f"AUC {res['auc_model']:.3f} 高得可疑，請檢查是否有未來資訊洩漏")
+
+
+# ---------------------------------------------------------------------------
+# 冪等性（回歸測試）
+# ---------------------------------------------------------------------------
+def test_history_generation_is_idempotent():
+    """
+    回歸測試：歷史產生器必須冪等，跑一次跟跑十次結果要一樣。
+
+    早期版本直接 INSERT 變更文件，重跑一次就寫入第二遍，
+    po_change_log 從 904 筆變成 1599 筆，改期次數憑空翻倍，
+    權重校準的結果因此每跑一次都不同。
+
+    這種 bug 不會報錯、資料照樣跑得出來，只是悄悄地錯 ——
+    而且直接違反專案標榜的「可重現」。
+    """
+    import sqlite3
+
+    import generate_history
+
+    def snapshot():
+        with sqlite3.connect(generate_history.DB_PATH) as con:
+            return {
+                t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("po_header", "po_item", "po_schedule",
+                          "po_change_log", "goods_receipt", "purchase_req")
+            }
+
+    generate_history.build_history(verbose=False)
+    first = snapshot()
+    generate_history.build_history(verbose=False)
+    second = snapshot()
+    assert first == second, f"重跑後筆數改變：{first} -> {second}"
+
+
+def test_no_duplicate_change_log_rows():
+    """變更文件不可有內容完全相同的重複列。"""
+    import sqlite3
+
+    import generate_history
+
+    with sqlite3.connect(generate_history.DB_PATH) as con:
+        total = con.execute("SELECT COUNT(*) FROM po_change_log").fetchone()[0]
+        distinct = con.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT po_no, item_no, old_value,"
+            " new_value, changed_at FROM po_change_log)").fetchone()[0]
+    assert total == distinct, f"變更文件有 {total - distinct} 筆重複"
