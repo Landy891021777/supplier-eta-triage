@@ -79,10 +79,14 @@ def main() -> None:
                                 disabled=not provider.available)
 
     st.sidebar.divider()
-    st.sidebar.subheader("影響評估權重")
+    st.sidebar.subheader("① 影響評估權重")
     st.sidebar.caption(
+        "**這是「相對份量」，不是分數。**\n\n"
+        "十條規則各自算出 0~1 的得分，再依這裡的份量加權平均，"
+        "換算成 0~100 的影響分數。所以你只要在意**相對大小** — "
+        "把某條調成兩倍，代表它的話語權變兩倍。\n\n"
         "這十條規則來自供應商端與物料企劃的實務判斷。"
-        "同仁若不同意某條規則的份量，可以直接調整並立即看到清單怎麼變 — "
+        "不同意哪一條的份量，直接調，清單會立刻重排 — "
         "工具要能被質疑，才會被使用。"
     )
     labels = {
@@ -98,16 +102,42 @@ def main() -> None:
         "substitutability": "10. 可替代性（有無替代料）",
     }
     weights = {}
-    for k, label in labels.items():
-        weights[k] = st.sidebar.slider(label, 0, 40, int(cfg["impact_weights"][k]), 1)
+    for key, label in labels.items():
+        weights[key] = st.sidebar.slider(label, 0, 40, int(cfg["impact_weights"][key]), 1)
+
+    # 把「相對份量」換算成「實際佔比」顯示出來。
+    # 沒有這個對照，使用者看到滑桿上的 25 會誤以為那是分數。
+    total_w = sum(weights.values())
+    if total_w > 0:
+        share = " ｜ ".join(
+            f"{labels[key].split('.')[0]}:{weights[key] / total_w * 100:.0f}%"
+            for key in labels if weights[key] > 0)
+        st.sidebar.caption(f"目前份量總和 **{total_w}**，換算後各條佔比：\n\n{share}")
+    else:
+        st.sidebar.error("所有權重都是 0，無法評分。請至少給一條規則份量。")
 
     st.sidebar.divider()
-    p1 = st.sidebar.slider("P1 門檻（今天要處理）", 40, 95,
+    st.sidebar.subheader("② 優先級門檻")
+    st.sidebar.caption(
+        "**這裡才是分數，範圍 0~100。**\n\n"
+        "上面的權重決定每張單得幾分，這裡決定幾分以上要今天處理。"
+        "門檻調低 → 清單變長、不會漏但會累；調高 → 清單變短、省力但可能漏。"
+        "這個取捨由使用單位自己決定。"
+    )
+    p1 = st.sidebar.slider("P1 門檻：幾分以上今天要處理", 40, 95,
                            int(cfg["priority_thresholds"]["P1"]))
-    p2 = st.sidebar.slider("P2 門檻（本週要追）", 10, 90,
+    p2 = st.sidebar.slider("P2 門檻：幾分以上本週要追", 10, 90,
                            int(cfg["priority_thresholds"]["P2"]))
+    if p2 >= p1:
+        st.sidebar.warning(
+            f"P2 門檻（{p2}）不低於 P1 門檻（{p1}），這樣不會有任何 P2 案件。"
+            "通常 P2 應該設得比 P1 低。")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("③ 效益試算參數")
     k = st.sidebar.number_input("生管每日可仔細追的案件數 (K)", 5, 100,
                                 int(cfg["benefit"]["daily_review_capacity"]))
+    st.sidebar.caption("僅影響「效益量化」分頁的 Recall@K，不影響行動清單排序。")
 
     thresholds = {"P1": p1, "P2": max(p2, 0)}
 
