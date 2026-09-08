@@ -85,7 +85,8 @@ def generate(row: dict, provider: BaseProvider | None = None) -> tuple[str, str]
         priority=row.get("priority"), impact=row.get("impact_score"),
         reasons="；".join(reasons) if isinstance(reasons, list) else str(reasons),
     )
-    resp = provider.complete(prompt, temperature=0.3)
+    # json_mode=False：這是要給人讀的信，不是要進資料表的結構化資料。
+    resp = provider.complete(prompt, temperature=0.3, json_mode=False)
     if resp.ok and resp.text.strip():
         return resp.text.strip(), f"{resp.provider} / {resp.model}（{resp.latency_ms} ms）"
     return _template_draft(row), f"LLM 呼叫失敗，已降級為模板：{resp.error[:120]}"

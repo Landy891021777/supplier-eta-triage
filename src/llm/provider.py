@@ -71,8 +71,9 @@ def _throttle() -> None:
         _last_call_at = time.time()
 
 
-def _cache_key(provider: str, model: str, prompt: str, temperature: float) -> str:
-    raw = f"{provider}|{model}|{temperature}|{prompt}".encode("utf-8")
+def _cache_key(provider: str, model: str, prompt: str, temperature: float,
+               json_mode: bool) -> str:
+    raw = f"{provider}|{model}|{temperature}|{json_mode}|{prompt}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -167,19 +168,29 @@ class BaseProvider:
         raise NotImplementedError
 
     def _raw_complete(self, prompt: str, *, temperature: float = 0.0,
-                      timeout: int = 45) -> LLMResponse:
+                      timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         """各家 provider 實作真正的 HTTP 呼叫。"""
         raise NotImplementedError
 
     def complete(self, prompt: str, *, temperature: float = 0.0,
-                 timeout: int = 45) -> LLMResponse:
+                 timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         """
         對外的統一入口：快取 → 節流 → 呼叫 → 退避重試。
 
         刻意寫在基底類別，讓三家 provider 共用同一套配額保護行為。
         新增一家 provider 時只要實作 _raw_complete，不必再處理這些。
+
+        `json_mode` 決定是否要求模型輸出結構化 JSON。
+        這個開關是必要的，不能全域寫死 —— 本工具有兩種完全不同的用途：
+
+          解析信件  需要 JSON，欄位要能直接進資料表    -> json_mode=True
+          撰寫草稿  需要自然語言，是要給人讀的信       -> json_mode=False
+
+        早期版本為了讓解析穩定，在 provider 裡全域強制 JSON 輸出，
+        結果回信草稿也被綁住，吐出一坨 {"subject":..., "content":...}
+        直接顯示在畫面上給生管看。抽象層若不區分用途，就會這樣傷到使用者。
         """
-        key = _cache_key(self.name, self.model, prompt, temperature)
+        key = _cache_key(self.name, self.model, prompt, temperature, json_mode)
         cached = _cache_get(key)
         if cached is not None:
             return LLMResponse(cached, True, self.name, self.model,
@@ -188,7 +199,8 @@ class BaseProvider:
         last: LLMResponse | None = None
         for attempt in range(_MAX_RETRIES + 1):
             _throttle()
-            resp = self._raw_complete(prompt, temperature=temperature, timeout=timeout)
+            resp = self._raw_complete(prompt, temperature=temperature,
+                                      timeout=timeout, json_mode=json_mode)
             if resp.ok:
                 _cache_put(key, resp.text)
                 return resp
@@ -218,7 +230,7 @@ class NullProvider(BaseProvider):
         return False
 
     def complete(self, prompt: str, *, temperature: float = 0.0,
-                 timeout: int = 45) -> LLMResponse:
+                 timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         # 覆寫而非實作 _raw_complete：無金鑰時沒有東西需要快取或重試。
         return LLMResponse(
             text="", ok=False, provider=self.name, model=self.model,
@@ -239,7 +251,7 @@ class GeminiProvider(BaseProvider):
         return bool(self.api_key)
 
     def _raw_complete(self, prompt: str, *, temperature: float = 0.0,
-                      timeout: int = 45) -> LLMResponse:
+                      timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         t0 = time.time()
         try:
             r = requests.post(
@@ -251,8 +263,9 @@ class GeminiProvider(BaseProvider):
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
                         "temperature": temperature,
-                        # 要求結構化輸出，減少「模型多講一句話害 JSON 解析失敗」
-                        "responseMimeType": "application/json",
+                        # 只在解析用途要求結構化輸出，減少「模型多講一句話
+                        # 害 JSON 解析失敗」；寫草稿時必須關掉，否則會吐 JSON。
+                        **({"responseMimeType": "application/json"} if json_mode else {}),
                     },
                 },
                 timeout=timeout,
@@ -282,7 +295,7 @@ class OpenAIProvider(BaseProvider):
         return bool(self.api_key)
 
     def _raw_complete(self, prompt: str, *, temperature: float = 0.0,
-                      timeout: int = 45) -> LLMResponse:
+                      timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         t0 = time.time()
         try:
             r = requests.post(
@@ -290,7 +303,7 @@ class OpenAIProvider(BaseProvider):
                 headers={"Authorization": f"Bearer {self.api_key}",
                          "Content-Type": "application/json"},
                 json={"model": self.model, "temperature": temperature,
-                      "response_format": {"type": "json_object"},
+                      **({"response_format": {"type": "json_object"}} if json_mode else {}),
                       "messages": [{"role": "user", "content": prompt}]},
                 timeout=timeout,
             )
@@ -319,7 +332,7 @@ class AnthropicProvider(BaseProvider):
         return bool(self.api_key)
 
     def _raw_complete(self, prompt: str, *, temperature: float = 0.0,
-                      timeout: int = 45) -> LLMResponse:
+                      timeout: int = 45, json_mode: bool = True) -> LLMResponse:
         t0 = time.time()
         try:
             r = requests.post(
