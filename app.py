@@ -51,11 +51,15 @@ def _ensure_data() -> None:
     因此雲端部署後第一次啟動會找不到資料。與其要求使用者先跑一次
     指令，不如讓工具自己補上 —— 導入的第一步不該卡在環境設定。
     """
-    if (ROOT / "data" / "po_master.csv").exists():
-        return
-    import generate_data
-    with st.spinner("首次啟動：正在產生合成資料…"):
-        generate_data.main()
+    if not (ROOT / "data" / "po_master.csv").exists():
+        import generate_data
+        with st.spinner("首次啟動：正在產生合成資料…"):
+            generate_data.main()
+    # 模擬 ERP 資料庫同樣是可重新生成的產物，不進版控，因此也要自動補上。
+    if not (ROOT / "data" / "erp_sim.db").exists():
+        import build_erp_db
+        with st.spinner("首次啟動：正在建立模擬 ERP 資料庫…"):
+            build_erp_db.build(verbose=False)
 
 
 def main() -> None:
