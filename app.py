@@ -181,7 +181,7 @@ def main() -> None:
     c5.metric("⚠️ 需人工確認", int(actions["needs_human_review"].sum()))
 
     tabs = st.tabs(["📋 今日行動清單", "📊 效益量化", "🔍 解析軌跡",
-                    "🧪 對照實驗", "📨 原始信件"])
+                    "🧪 對照實驗", "📨 原始信件", "📄 ERP 單據", "⚖️ 權重校準"])
 
     # ==================== 分頁 1：行動清單 ====================
     with tabs[0]:
@@ -367,6 +367,86 @@ def main() -> None:
         st.text(f"From: {e['supplier_id']}\nDate: {e['received_at']}\n"
                 f"Subject: {e['subject']}\nTags: {', '.join(e.get('tags', []))}\n")
         st.code(e["body"], language=None)
+
+
+    # ==================== 分頁 6：ERP 單據 ====================
+    with tabs[5]:
+        st.subheader("ERP 單據軌跡")
+        st.caption(
+            "一張採購單在 ERP 裡不是一列資料，是散落在六張表裡的一串單據。"
+            "這一頁把它們串起來 — 也是最能說明「為什麼整合 ERP 不是撈一張表就好」的一頁。")
+        src6 = pipeline.get_data_source(cfg)
+        if not hasattr(src6, "document_trail"):
+            st.info("目前的資料來源是 CSV，沒有單據結構。"
+                    "請將 config.yaml 的 data_source 改為 sqlite。")
+        else:
+            c1, c2 = st.columns([1, 2])
+            kind = c1.radio("單據狀態", ["在途（未收貨）", "已結案（有收貨）"],
+                            help="已結案的單有實際到料日，是權重校準的資料來源。")
+            pool = (src6.open_po_numbers() if kind.startswith("在途")
+                    else src6.closed_po_numbers())
+            if not pool:
+                st.info("這個狀態下沒有單據。")
+            else:
+                default = ("PO-2026-04205" if "PO-2026-04205" in pool else pool[0])
+                po_sel = c2.selectbox("選擇採購單", pool,
+                                      index=pool.index(default))
+                trail = src6.document_trail(po_sel)
+                for label, tdf in trail.items():
+                    st.markdown(f"**{label}**")
+                    if tdf.empty:
+                        st.caption("（無資料）")
+                    else:
+                        st.dataframe(tdf, use_container_width=True, hide_index=True)
+                st.caption(
+                    "注意第 ④ 與第 ⑤ 張表：**承諾日不在採購單頭，改期次數也沒有現成欄位**。"
+                    "工具必須自己 JOIN 與 COUNT — 這就是接 ERP 真正的工作量所在。")
+
+    # ==================== 分頁 7：權重校準 ====================
+    with tabs[6]:
+        st.subheader("權重校準：資料同不同意我訂的權重")
+        st.caption(
+            "評分卡的權重是依實務直覺訂的假設。一旦累積了歷史結果"
+            "（實際到料日 vs 下游需求日），就可以反過來檢驗它。")
+        st.warning(
+            "⚠️ **本頁使用模擬歷史資料，係數僅供展示流程，不可用於決策。**\n\n"
+            "歷史結果由 `src/generate_history.py` 的因果模型產生，非真實資料。"
+            "在真實環境，這裡的輸入應該是 ERP 的收貨紀錄。")
+        try:
+            res = _run_calibration()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("已結案樣本", res["n_total"])
+            m2.metric("實際造成缺料", f"{res['n_shortage']}（{res['shortage_rate']:.1%}）")
+            m3.metric("人訂 vs 學習 AUC",
+                      f"{res['auc_hand']:.3f} → {res['auc_model']:.3f}")
+            t = res["table"].copy()
+            t.index.name = "規則"
+            t = t.reset_index()
+            t["規則"] = t["規則"].map(labels).fillna(t["規則"])
+            st.dataframe(t, use_container_width=True, hide_index=True)
+            st.info(
+                "**「方向相反」不等於規則錯 — 這是本次校準最重要的發現。**\n\n"
+                "校準的 outcome 是「會不會缺料」，衡量的是**發生機率**。"
+                "但「下游已排定」「延遲量佔比」「可替代性」預測的根本不是機率，"
+                "而是**缺了之後有多痛**（代價）。\n\n"
+                "下游有沒有排定產能，不會改變供應商延不延；"
+                "但它決定延了之後要動幾條排程、要不要跟客戶道歉。\n\n"
+                "**評分卡本來就在混合兩件事：發生機率 × 影響代價。**"
+                "歷史資料只能校準機率那一半 — 除非公司有在記錄每次缺料的實際損失。")
+            st.markdown(
+                "**沒有被校準的規則：`commitment_strength`（承諾強度）**\n\n"
+                "訊號來自信件語氣，而 ERP 只存結果、不存語氣。"
+                "歷史資料裡根本沒有這個欄位，必須等工具上線後自行累積。"
+                "這一條校準不了，恰好說明了這個工具存在的理由："
+                "**它產生的是 ERP 結構上不會有的資料。**")
+        except (FileNotFoundError, RuntimeError) as e:
+            st.info(f"{e}\n\n請先執行： `py src/generate_history.py`")
+
+
+@st.cache_data(show_spinner="校準中…")
+def _run_calibration():
+    import calibrate as calib
+    return calib.calibrate()
 
 
 if __name__ == "__main__":

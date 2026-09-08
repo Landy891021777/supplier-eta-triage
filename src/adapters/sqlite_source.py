@@ -75,6 +75,12 @@ JOIN po_item      i  ON i.po_no = h.po_no
 JOIN latest_sched s  ON s.po_no = i.po_no AND s.item_no = i.item_no
 LEFT JOIN purchase_req r  ON r.pr_no  = i.pr_no
 LEFT JOIN reschedules  rs ON rs.po_no = i.po_no AND rs.item_no = i.item_no
+LEFT JOIN goods_receipt g ON g.po_no  = i.po_no AND g.item_no = i.item_no
+-- 只取「在途」採購單：已收貨的單不該出現在今日行動清單裡。
+-- 這個條件在 CSV 版本不存在，因為 CSV 裡壓根沒有歷史單 ——
+-- 這正是扁平檔案掩蓋掉的另一個現實：真實 ERP 裡未結與已結的單混在一起，
+-- 「哪些還要追」本身就是一個要靠 JOIN 判斷的問題。
+WHERE g.gr_no IS NULL
 ORDER BY h.po_no
 """
 
@@ -153,6 +159,69 @@ class SqliteSource(DataSource):
         return f"模擬 ERP 資料庫（SQLite，欄位以 SQL JOIN 推導）：{self.db_path.name}"
 
     # -----------------------------------------------------------------
+    def document_trail(self, po_no: str) -> dict[str, pd.DataFrame]:
+        """
+        單據軌跡：一張採購單在 ERP 裡實際散落成哪些單據。
+
+        這是給使用者看的「往下鑽」畫面 —— 也是最能說明
+        「為什麼整合 ERP 不是撈一張表就好」的一頁。
+        一張採購單的完整故事橫跨六張表：
+        請購 → 採購單頭 → 項次 → 交貨排程 → 變更紀錄 → 收貨。
+        """
+        queries = {
+            "① 請購單 (≈EBAN)": """
+                SELECT r.pr_no AS 請購單號, r.material_id AS 料號,
+                       r.req_qty AS 請購量, r.need_date AS 下游需求日,
+                       r.period_demand_qty AS 當期總需求,
+                       CASE WHEN r.downstream_scheduled=1 THEN '是' ELSE '否' END AS 下游已排定
+                FROM po_item i JOIN purchase_req r ON r.pr_no = i.pr_no
+                WHERE i.po_no = ?""",
+            "② 採購單頭 (≈EKKO)": """
+                SELECT h.po_no AS 採購單號, h.vendor_id AS 供應商,
+                       v.vendor_name AS 供應商名稱, h.created_date AS 建立日
+                FROM po_header h LEFT JOIN vendor_master v ON v.vendor_id = h.vendor_id
+                WHERE h.po_no = ?""",
+            "③ 採購單項次 (≈EKPO)": """
+                SELECT po_no AS 採購單號, item_no AS 項次,
+                       material_id AS 料號, qty AS 數量, pr_no AS 來源請購單
+                FROM po_item WHERE po_no = ?""",
+            "④ 交貨排程行 (≈EKET)　承諾日在這裡": """
+                SELECT po_no AS 採購單號, item_no AS 項次, sched_line AS 排程行,
+                       committed_date AS 承諾交期, qty AS 數量
+                FROM po_schedule WHERE po_no = ? ORDER BY sched_line""",
+            "⑤ 變更文件 (≈CDHDR/CDPOS)　改期次數要 COUNT 這張": """
+                SELECT changed_at AS 變更日, field_name AS 欄位,
+                       old_value AS 原值, new_value AS 新值, changed_by AS 變更者
+                FROM po_change_log WHERE po_no = ? ORDER BY changed_at""",
+            "⑥ 收貨紀錄 (≈MKPF/MSEG)　實際到料日": """
+                SELECT gr_no AS 收貨單號, qty AS 收貨量, receipt_date AS 實際到料日
+                FROM goods_receipt WHERE po_no = ?""",
+        }
+        out: dict[str, pd.DataFrame] = {}
+        with sqlite3.connect(self.db_path) as con:
+            for label, sql in queries.items():
+                out[label] = pd.read_sql_query(sql, con, params=(po_no,))
+        return out
+
+    def open_po_numbers(self, limit: int = 400) -> list[str]:
+        """尚未收貨的採購單（在途）。"""
+        with sqlite3.connect(self.db_path) as con:
+            rows = con.execute("""
+                SELECT i.po_no FROM po_item i
+                LEFT JOIN goods_receipt g
+                       ON g.po_no = i.po_no AND g.item_no = i.item_no
+                WHERE g.gr_no IS NULL
+                ORDER BY i.po_no LIMIT ?""", (limit,)).fetchall()
+        return [r[0] for r in rows]
+
+    def closed_po_numbers(self, limit: int = 400) -> list[str]:
+        """已收貨結案的採購單（有 outcome，可用於校準）。"""
+        with sqlite3.connect(self.db_path) as con:
+            rows = con.execute(
+                "SELECT DISTINCT po_no FROM goods_receipt ORDER BY po_no LIMIT ?",
+                (limit,)).fetchall()
+        return [r[0] for r in rows]
+
     def table_counts(self) -> dict[str, int]:
         """給 UI 顯示各表筆數，讓使用者看得到資料實際長什麼樣。"""
         tables = ("vendor_master", "material_master", "material_alternate",
