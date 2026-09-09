@@ -246,6 +246,21 @@ def main() -> None:
                                 "contribution": "貢獻", "explain": "理由"}),
                             use_container_width=True, hide_index=True)
                     with b:
+                        # 供應商歷史表現：把 ERP 收貨紀錄變成當下用得到的判斷依據。
+                        # 生管看到「他說 10/29」時，真正想知道的是
+                        # 「這家供應商說的話能信幾分、實際大概哪天到」。
+                        hist = _supplier_history(row.get("supplier_id"),
+                                                 row.get("new_eta") or row.get("committed_date"))
+                        if hist:
+                            st.markdown("**供應商歷史表現（近 12 個月）**")
+                            if hist.get("available"):
+                                st.metric("保守到料日（歷史 P80）", hist["conservative"],
+                                          delta=f"較承諾日 +{hist['p80_delay']} 天",
+                                          delta_color="inverse")
+                                st.caption(hist["note"] + "。此為歷史統計，非預測模型。")
+                            else:
+                                st.caption(hist.get("reason", ""))
+                            st.divider()
                         st.markdown("**原始信件**")
                         st.caption(f"{row['email_id']}｜{row['subject']}")
                         st.text(str(row.get("notes", ""))[:400])
@@ -413,6 +428,26 @@ def main() -> None:
             "歷史結果由 `src/generate_history.py` 的因果模型產生，非真實資料。"
             "在真實環境，這裡的輸入應該是 ERP 的收貨紀錄。")
         try:
+            st.markdown("#### 一、歷史單據直接給生管的判斷依據")
+            st.caption(
+                "在讓資料去校準權重之前，歷史單據更直接的用途是回答生管當下的問題："
+                "這家供應商說的話能信幾分？以下兩張表就是行動清單上「保守到料日」的來源。")
+            pcol, rcol = st.columns([3, 2])
+            with pcol:
+                st.markdown("**各供應商歷史表現**")
+                st.dataframe(_supplier_performance(), use_container_width=True,
+                             hide_index=True, height=260)
+            with rcol:
+                st.markdown("**改期次數 vs 最終是否延遲**")
+                st.dataframe(_reschedule_reliability(), use_container_width=True,
+                             hide_index=True)
+                st.caption(
+                    "這張表在**驗證規則 7（累犯）**：改期越多次的單，最終仍延遲的"
+                    "比例越高。若資料顯示無關，這條規則就該被拿掉 —— "
+                    "工具必須容許自己的規則被自己的資料推翻。")
+            st.divider()
+            st.markdown("#### 二、用歷史結果回頭校準十條權重")
+
             res = _run_calibration()
             m1, m2, m3 = st.columns(3)
             m1.metric("已結案樣本", res["n_total"])
@@ -447,6 +482,30 @@ def main() -> None:
 def _run_calibration():
     import calibrate as calib
     return calib.calibrate()
+
+
+@st.cache_data(show_spinner=False)
+def _supplier_performance():
+    import supplier_stats
+    return supplier_stats.supplier_performance()
+
+
+@st.cache_data(show_spinner=False)
+def _reschedule_reliability():
+    import supplier_stats
+    return supplier_stats.reschedule_reliability()
+
+
+def _supplier_history(supplier_id, promised):
+    """查供應商歷史表現；沒有歷史資料時安靜略過，不讓畫面壞掉。"""
+    if not supplier_id or not promised:
+        return None
+    try:
+        import supplier_stats
+        return supplier_stats.conservative_eta(
+            supplier_id, promised, _supplier_performance())
+    except (FileNotFoundError, RuntimeError):
+        return None
 
 
 if __name__ == "__main__":

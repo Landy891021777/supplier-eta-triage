@@ -137,3 +137,53 @@ def test_no_duplicate_change_log_rows():
             "SELECT COUNT(*) FROM (SELECT DISTINCT po_no, item_no, old_value,"
             " new_value, changed_at FROM po_change_log)").fetchone()[0]
     assert total == distinct, f"變更文件有 {total - distinct} 筆重複"
+
+
+# ---------------------------------------------------------------------------
+# 供應商歷史表現（給生管的決策依據，非預測模型）
+# ---------------------------------------------------------------------------
+def test_supplier_performance_flags_small_samples():
+    """
+    樣本太少的統計會誤導人。只有三張單的供應商算出「準交率 33%」，
+    那個數字不該拿去做決策，工具寧可說「樣本不足」也不要給假訊號。
+    """
+    import supplier_stats
+
+    perf = supplier_stats.supplier_performance(min_samples=1000)
+    assert not perf["樣本是否足夠"].any(), "門檻拉高後不應有任何供應商通過"
+
+    perf = supplier_stats.supplier_performance(min_samples=1)
+    assert perf["樣本是否足夠"].all()
+    assert (perf["準交率"].between(0, 1)).all()
+
+
+def test_conservative_eta_is_never_earlier_than_promised():
+    """保守到料日是給排程用的下限，不可能比供應商承諾的還早。"""
+    import supplier_stats
+
+    perf = supplier_stats.supplier_performance()
+    for sid in perf["supplier_id"]:
+        r = supplier_stats.conservative_eta(sid, "2026-10-29", perf)
+        if r.get("available"):
+            assert r["conservative"] >= r["promised"], sid
+
+
+def test_conservative_eta_refuses_when_samples_insufficient():
+    import supplier_stats
+
+    perf = supplier_stats.supplier_performance(min_samples=10_000)
+    r = supplier_stats.conservative_eta(perf["supplier_id"].iloc[0], "2026-10-29", perf)
+    assert r["available"] is False
+    assert "樣本不足" in r["reason"]
+
+
+def test_reschedule_reliability_validates_repeat_offender_rule():
+    """
+    這張表是規則 7（累犯）的自我驗證：改期越多次，最終仍延遲的比例應越高。
+    若這個關係不成立，規則 7 就該被拿掉。
+    """
+    import supplier_stats
+
+    t = supplier_stats.reschedule_reliability().set_index("改期情形")
+    if {"未改期", "改期 3 次以上"} <= set(t.index):
+        assert t.loc["改期 3 次以上", "最終仍延遲比例"] > t.loc["未改期", "最終仍延遲比例"]
