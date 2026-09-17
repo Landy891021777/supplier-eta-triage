@@ -138,9 +138,9 @@ CREATE TABLE po_change_log (
     changed_by TEXT
 );
 
--- 收貨紀錄 (≈ SAP MKPF/MSEG)。
--- 目前是空的 —— 這是刻意的：它代表「工具上線後才會累積的真實結果」，
--- 也是未來用資料校準規則權重的唯一來源。詳見 README 第十節。
+-- 收貨紀錄 (≈ SAP MKPF/MSEG)。實際到料日，也就是「後來到底怎麼了」。
+-- 本程式建立時為空；歷史單據與收貨紀錄由 generate_history.py 另外寫入。
+-- 它是供應商準交表現與權重校準的唯一資料來源。
 CREATE TABLE goods_receipt (
     gr_no        TEXT PRIMARY KEY,
     po_no        TEXT NOT NULL,
@@ -262,8 +262,6 @@ def build(verbose: bool = True) -> Path:
         print(f"[OK] 模擬 ERP 資料庫： {DB_PATH}")
         for t, c in counts.items():
             print(f"       {t:<20} {c:>6} 筆")
-        print("       goods_receipt 刻意為空：它代表工具上線後才會累積的真實結果，")
-        print("       也是未來用資料校準規則權重的唯一來源。")
     con.close()
     return DB_PATH
 
