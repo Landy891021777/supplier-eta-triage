@@ -27,12 +27,15 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
+import os  # noqa: E402
+
 import benefit  # noqa: E402
 import draft as draft_mod  # noqa: E402
 import pipeline  # noqa: E402
 from llm.provider import get_provider  # noqa: E402
 
-st.set_page_config(page_title="供應商交期回覆解析工具", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Supply Chain AI Tool: Delivery Risk Prioritization",
+                   page_icon="📦", layout="wide")
 
 PRIORITY_COLOR = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "待查": "⚪", "—": "⚫"}
 
@@ -167,7 +170,7 @@ def main() -> None:
     )
 
     # ---------------- 標題與摘要 ----------------
-    st.title("📦 供應商交期回覆解析與影響評估")
+    st.title("📦 供應鏈 AI 工具：交期風險優先排序")
     st.caption(
         f"模擬基準日 **{result['as_of']}** ｜ 本次處理 **{stats['emails_processed']}** 封供應商回覆信 "
         "｜ 資料為合成資料，僅供展示（見 README 的誠實聲明）"
@@ -180,11 +183,15 @@ def main() -> None:
     c4.metric("🔴 今天要處理 P1", stats["p1"])
     c5.metric("⚠️ 需人工確認", int(actions["needs_human_review"].sum()))
 
-    tabs = st.tabs(["📋 今日行動清單", "📊 效益量化", "🔍 解析軌跡",
-                    "🧪 對照實驗", "📨 原始信件", "📄 ERP 單據", "⚖️ 權重校準"])
+    # 分頁順序依使用情境排列：生管每天用的在前，驗證與稽核用的在後。
+    # 以具名變數取代 tabs[0]～tabs[6] 索引：插入或調整分頁時不會整批錯位。
+    (t_actions, t_search, t_erp, t_calib,
+     t_experiment, t_benefit, t_trace, t_emails) = st.tabs([
+        "📋 今日行動清單", "🔎 物料智能檢索", "📄 ERP 單據", "⚖️ 供應商歷史與權重",
+        "🧪 評估實驗", "📊 效益量化", "🔍 解析軌跡", "📨 原始信件"])
 
     # ==================== 分頁 1：行動清單 ====================
-    with tabs[0]:
+    with t_actions:
         st.subheader("今日行動清單")
         st.caption("依影響分數排序。展開任一筆可看到十條規則各拿幾分，以及回信草稿。")
 
@@ -213,7 +220,7 @@ def main() -> None:
                     "material_id": "料號", "supplier_name": "供應商",
                     "committed_date": "原承諾日", "new_eta": "新交期",
                     "commitment_strength": "承諾強度", "needs_human_review": "需人工確認"}),
-                use_container_width=True, hide_index=True, height=280)
+                width="stretch", hide_index=True, height=280)
 
             st.divider()
             st.markdown("#### 逐案展開")
@@ -244,7 +251,7 @@ def main() -> None:
                             detail.rename(columns={
                                 "rule": "規則", "score": "得分(0~1)", "weight": "權重",
                                 "contribution": "貢獻", "explain": "理由"}),
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                     with b:
                         # 供應商歷史表現：把 ERP 收貨紀錄變成當下用得到的判斷依據。
                         # 生管看到「他說 10/29」時，真正想知道的是
@@ -277,7 +284,7 @@ def main() -> None:
                 file_name="行動清單.csv", mime="text/csv")
 
     # ==================== 分頁 2：效益量化 ====================
-    with tabs[1]:
+    with t_benefit:
         st.subheader("效益量化")
         st.warning(
             "**這裡不會出現「節省 30% 人力」這種數字。**\n\n"
@@ -298,7 +305,7 @@ def main() -> None:
             f"若生管一天只能仔細追 {k} 件，各種排序方式各能抓到多少比例的"
             "「真的會來不及」案件？（會不會來不及＝新交期是否晚於下游需求日，"
             "由日期相減得到，不是模型輸出）")
-        st.dataframe(rep["strategies"], use_container_width=True, hide_index=True)
+        st.dataframe(rep["strategies"], width="stretch", hide_index=True)
         st.info(
             f"本批共 {rep['n_actions']} 件，其中 {rep['n_will_be_short']} 件實際會來不及。\n\n"
             "**必須說明的限制**：影響分數的規則 1（緩衝天數）使用了與 outcome "
@@ -306,10 +313,10 @@ def main() -> None:
             "緩衝訊號傳遞到清單前段，**不能**證明工具可以預測未知結果。")
 
         st.markdown("#### 三、工時敏感度分析")
-        st.dataframe(rep["sensitivity"], use_container_width=True, hide_index=True)
+        st.dataframe(rep["sensitivity"], width="stretch", hide_index=True)
 
     # ==================== 分頁 3：解析軌跡 ====================
-    with tabs[2]:
+    with t_trace:
         st.subheader("解析軌跡（可稽核性）")
         st.caption(
             "每封信走過哪幾層、為什麼升級、LLM 是否成功、花了多久。"
@@ -347,7 +354,7 @@ def main() -> None:
                 st.dataframe(
                     pd.DataFrame([{"資料表": t, "筆數": c, "對應（SAP 為例）": sap.get(t, "")}
                                   for t, c in counts.items()]),
-                    use_container_width=True, hide_index=True)
+                    width="stretch", hide_index=True)
                 st.caption(
                     "`goods_receipt` 刻意為空：它代表工具上線後才會累積的真實結果，"
                     "也是未來用資料校準規則權重的唯一來源。"
@@ -359,20 +366,26 @@ def main() -> None:
                 "escalated": "是否升級", "llm_ok": "LLM成功",
                 "llm_latency_ms": "LLM耗時(ms)", "llm_error": "錯誤",
                 "final_layer": "最終採用", "reason": "升級判斷"}),
-            use_container_width=True, hide_index=True, height=420)
+            width="stretch", hide_index=True, height=420)
 
-    # ==================== 分頁 4：對照實驗 ====================
-    with tabs[3]:
-        st.subheader("對照實驗：規則層 vs LLM 層")
-        st.caption("回答一個必須被回答的問題：這裡到底需不需要 LLM？")
-        exp = ROOT / "output" / "實驗結果.md"
-        if exp.exists():
-            st.markdown(exp.read_text(encoding="utf-8"))
-        else:
-            st.info("尚未執行實驗。請於終端機執行： `py src/evaluate.py`")
+    # ==================== 評估實驗 ====================
+    with t_experiment:
+        st.subheader("評估實驗")
+        st.caption("每一個設計決定都要有證據，而且評估必須容許推翻原本的假設。")
+        exp_parse, exp_rag = st.tabs(["解析：規則層 vs LLM 層", "檢索：六種配置比較"])
+        for container, fname, cmd in (
+            (exp_parse, "實驗結果.md", "py src/evaluate.py"),
+            (exp_rag, "RAG檢索評估.md", "py src/rag/evaluate_rag.py"),
+        ):
+            with container:
+                path = ROOT / "output" / fname
+                if path.exists():
+                    st.markdown(path.read_text(encoding="utf-8"))
+                else:
+                    st.info(f"尚未執行評估。請於終端機執行： `{cmd}`")
 
     # ==================== 分頁 5：原始信件 ====================
-    with tabs[4]:
+    with t_emails:
         st.subheader("原始信件")
         st.caption("含 10 封手寫的刁鑽案例（轉寄串、一信多單、模糊措辭、分批交貨…）。")
         emails = pipeline.load_emails()
@@ -385,7 +398,7 @@ def main() -> None:
 
 
     # ==================== 分頁 6：ERP 單據 ====================
-    with tabs[5]:
+    with t_erp:
         st.subheader("ERP 單據軌跡")
         st.caption(
             "一張採購單在 ERP 裡不是一列資料，是散落在六張表裡的一串單據。"
@@ -412,13 +425,13 @@ def main() -> None:
                     if tdf.empty:
                         st.caption("（無資料）")
                     else:
-                        st.dataframe(tdf, use_container_width=True, hide_index=True)
+                        st.dataframe(tdf, width="stretch", hide_index=True)
                 st.caption(
                     "注意第 ④ 與第 ⑤ 張表：**承諾日不在採購單頭，改期次數也沒有現成欄位**。"
                     "工具必須自己 JOIN 與 COUNT — 這就是接 ERP 真正的工作量所在。")
 
     # ==================== 分頁 7：權重校準 ====================
-    with tabs[6]:
+    with t_calib:
         st.subheader("權重校準：資料同不同意我訂的權重")
         st.caption(
             "評分卡的權重是依實務直覺訂的假設。一旦累積了歷史結果"
@@ -435,11 +448,11 @@ def main() -> None:
             pcol, rcol = st.columns([3, 2])
             with pcol:
                 st.markdown("**各供應商歷史表現**")
-                st.dataframe(_supplier_performance(), use_container_width=True,
+                st.dataframe(_supplier_performance(), width="stretch",
                              hide_index=True, height=260)
             with rcol:
                 st.markdown("**改期次數 vs 最終是否延遲**")
-                st.dataframe(_reschedule_reliability(), use_container_width=True,
+                st.dataframe(_reschedule_reliability(), width="stretch",
                              hide_index=True)
                 st.caption(
                     "這張表在**驗證規則 7（累犯）**：改期越多次的單，最終仍延遲的"
@@ -458,7 +471,7 @@ def main() -> None:
             t.index.name = "規則"
             t = t.reset_index()
             t["規則"] = t["規則"].map(labels).fillna(t["規則"])
-            st.dataframe(t, use_container_width=True, hide_index=True)
+            st.dataframe(t, width="stretch", hide_index=True)
             st.info(
                 "**「方向相反」不等於規則錯 — 這是本次校準最重要的發現。**\n\n"
                 "校準的 outcome 是「會不會缺料」，衡量的是**發生機率**。"
@@ -476,6 +489,102 @@ def main() -> None:
                 "**它產生的是 ERP 結構上不會有的資料。**")
         except (FileNotFoundError, RuntimeError) as e:
             st.info(f"{e}\n\n請先執行： `py src/generate_history.py`")
+
+    # ==================== 物料智能檢索（RAG） ====================
+    with t_search:
+        _render_search_tab(str(result["as_of"]))
+
+
+# ---------------------------------------------------------------------------
+# 物料智能檢索
+# ---------------------------------------------------------------------------
+RAG_EXAMPLES = [
+    "PO-2026-04205 的供應商可靠嗎？這張單現在緊不緊急？",
+    "哪家供應商最常延遲交貨？",
+    "哪些料缺了沒辦法找別家救？",
+    "快要趕不上生產的訂單有哪些？",
+    "工具會不會自動幫我改 SAP 的交期？",
+    "為什麼不是每封信都丟給 AI 讀？",
+]
+RETRIEVAL_LABEL = {"pinned": "識別碼精確比對", "semantic": "語意相近",
+                   "lexical": "字詞相符", "hybrid": "綜合排序"}
+# 公開展示時的保護：每位訪客在一次工作階段內最多觸發的「未快取」LLM 呼叫次數。
+# 超過後改為直接列出檢索到的原始資料，工具照樣可用，但不再消耗 API 配額。
+LLM_CALLS_PER_SESSION = int(os.getenv("LLM_CALLS_PER_SESSION", "20"))
+
+
+@st.cache_resource(show_spinner="建立物料檢索索引…")
+def _load_retriever():
+    from rag.knowledge import build_cards
+    from rag.retriever import HybridRetriever
+    retriever = HybridRetriever(build_cards(), provider=get_provider())
+    retriever.build_semantic_index()
+    return retriever
+
+
+def _llm_budget_left() -> int:
+    return LLM_CALLS_PER_SESSION - st.session_state.get("llm_live_calls", 0)
+
+
+def _render_search_tab(reference_date: str) -> None:
+    from rag.answer import answer as rag_answer
+
+    st.subheader("物料智能檢索")
+    st.caption(
+        "用平常講話的方式查詢採購單、料號、供應商表現與工具使用說明。"
+        "回答只根據檢索到的資料，每一個事實都標註出處；資料裡沒有的，會直接說沒有。")
+
+    try:
+        retriever = _load_retriever()
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
+        st.error(f"無法建立檢索索引：{e}")
+        return
+
+    mode_label = ("語意檢索 ＋ 識別碼精確比對" if retriever.semantic_ready
+                  else "詞彙檢索 ＋ 識別碼精確比對（未設定 embedding 金鑰時的備援模式）")
+    st.caption(f"檢索模式：**{mode_label}**｜知識庫 **{len(retriever.cards)}** 張卡片"
+               "（採購單、料號、供應商、摘要與工具文件）")
+
+    cols = st.columns(3)
+    for i, example in enumerate(RAG_EXAMPLES):
+        if cols[i % 3].button(example, key=f"rag-ex-{i}", width="stretch"):
+            st.session_state["rag_question"] = example
+
+    question = st.text_input("輸入問題", key="rag_question",
+                             placeholder="例：SUB-FCCSP-1088 有沒有第二家可以買？")
+    if not question:
+        return
+
+    budget = _llm_budget_left()
+    provider = get_provider() if budget > 0 else None
+    with st.spinner("檢索並整理回答中…"):
+        res = rag_answer(question, retriever, provider, reference_date=reference_date)
+
+    if res.get("llm"):
+        # 只有真的打到 API 才扣額度；命中快取的回答不算
+        if res.get("latency_ms", 0) > 0:
+            st.session_state["llm_live_calls"] = st.session_state.get("llm_live_calls", 0) + 1
+        st.markdown(res["answer"])
+        cites = res.get("citations") or {}
+        if cites.get("invalid"):
+            st.warning(
+                f"模型引用了未提供給它的資料 {cites['invalid']}，相關敘述可能是推測，"
+                "請以下方原始資料為準。")
+        elif cites.get("uncited") and "沒有這項資訊" not in res["answer"]:
+            st.warning("回答未標註任何出處，請以下方原始資料為準。")
+    else:
+        if budget <= 0:
+            st.info("本次工作階段的 AI 回答額度已用完，以下直接列出檢索到的原始資料。")
+        elif res.get("note"):
+            st.info(res["note"])
+
+    if res.get("hits"):
+        st.markdown("**參考資料**")
+        for hit in res["hits"]:
+            label = RETRIEVAL_LABEL.get(hit.source, hit.source)
+            with st.expander(f"[{hit.card.card_id}] {hit.card.title}　·　{label}",
+                             expanded=not res.get("llm")):
+                st.text(hit.card.text)
 
 
 @st.cache_data(show_spinner="校準中…")

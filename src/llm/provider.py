@@ -34,6 +34,12 @@ import requests
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CACHE_DIR = ROOT / ".cache" / "llm"
+# 唯讀種子快取：部署時一併上傳的預先計算結果。
+# 公開展示的網址不該讓每位訪客重新觸發 LLM 呼叫 —— 既耗配額，冷啟動也要等很久。
+# 資料產生器使用固定亂數種子，prompt 內容可重現，因此快取鍵在雲端也對得上。
+SEED_CACHE_DIR = ROOT / "demo_cache" / "llm"
+# 本次程序實際讀寫過的快取鍵，供匯出種子快取時只挑「真的用得到」的項目
+ACCESSED_KEYS: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # 配額保護：節流、退避重試、結果快取
@@ -80,18 +86,23 @@ def _cache_key(provider: str, model: str, prompt: str, temperature: float,
 def _cache_get(key: str) -> str | None:
     if not _USE_CACHE:
         return None
-    p = CACHE_DIR / f"{key}.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))["text"]
-    except (json.JSONDecodeError, KeyError, OSError):
-        return None
+    for directory in (CACHE_DIR, SEED_CACHE_DIR):
+        p = directory / f"{key}.json"
+        if not p.exists():
+            continue
+        try:
+            text = json.loads(p.read_text(encoding="utf-8"))["text"]
+            ACCESSED_KEYS.add(key)
+            return text
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue
+    return None
 
 
 def _cache_put(key: str, text: str) -> None:
     if not _USE_CACHE:
         return
+    ACCESSED_KEYS.add(key)
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         (CACHE_DIR / f"{key}.json").write_text(
@@ -117,16 +128,27 @@ def _retry_delay_from(body: str, attempt: int) -> float:
 
 
 def _load_dotenv() -> None:
-    """輕量 .env 載入，避免多一個硬相依。已存在的環境變數優先。"""
+    """
+    載入設定，優先順序：既有環境變數 > .env > Streamlit secrets。
+
+    Streamlit Community Cloud 不能放 .env（會進版控），金鑰要放在它的 secrets 設定。
+    兩種來源都支援，程式其餘部分就不必知道自己跑在本機還是雲端。
+    """
     env_path = ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+    try:
+        import streamlit as st
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float)):
+                os.environ.setdefault(k, str(v))
+    except Exception:
+        pass  # 沒有 streamlit、沒有 secrets 檔、或不在 streamlit 環境執行：都正常
 
 
 @dataclass
@@ -210,6 +232,74 @@ class BaseProvider:
             time.sleep(_retry_delay_from(resp.error, attempt))
         return last or LLMResponse("", False, self.name, self.model, 0, "unknown error")
 
+    # -----------------------------------------------------------------
+    # Embedding（向量化）：給 RAG 語意檢索用
+    # -----------------------------------------------------------------
+    embed_model: str | None = None
+
+    @property
+    def can_embed(self) -> bool:
+        """
+        不是每家 provider 都有 embedding API（例如 Anthropic 就沒有）。
+
+        抽象層必須允許某些能力缺席，而不是假設全部廠商功能對等。
+        上層看到 can_embed=False 時改用詞彙檢索，工具照樣可用。
+        """
+        return self.available and bool(self.embed_model)
+
+    def _raw_embed(self, texts: list[str], task_type: str) -> list[list[float]] | None:
+        return None
+
+    def embed(self, texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT",
+              max_batch_items: int = 100, max_batch_chars: int = 6000,
+              max_retries: int = 6) -> list[list[float]] | None:
+        """
+        批次向量化，沿用同一套節流與退避重試。
+
+        task_type 區分「文件」與「查詢」：同一段文字當成被檢索的文件，
+        或當成使用者的提問，最佳的向量表示並不相同。
+
+        **依字數切批，而不是依筆數切批。** 踩坑紀錄：原本固定每批 100 筆，
+        結果一批約 2.4 萬字，直接超過每分鐘 token 上限而整批 429；
+        而重試又在同一分鐘內把額度疊上去，最後判定失敗。
+        卡片長短差很多（摘要卡上千字、採購單卡兩百字），
+        只數筆數會讓某些批次特別肥。
+
+        建索引是一次性工作、可以慢，所以重試次數給得比即時呼叫寬。
+        失敗回傳 None，由上層降級為詞彙檢索，不讓工具整個掛掉。
+        """
+        if not self.can_embed:
+            return None
+
+        batches: list[list[str]] = []
+        current: list[str] = []
+        chars = 0
+        for t in texts:
+            if current and (len(current) >= max_batch_items or chars + len(t) > max_batch_chars):
+                batches.append(current)
+                current, chars = [], 0
+            current.append(t)
+            chars += len(t)
+        if current:
+            batches.append(current)
+
+        out: list[list[float]] = []
+        for chunk in batches:
+            vectors = None
+            for attempt in range(max_retries + 1):
+                _throttle()
+                try:
+                    vectors = self._raw_embed(chunk, task_type)
+                    break
+                except RuntimeError as e:
+                    if attempt == max_retries or not _is_retryable(str(e)):
+                        return None
+                    time.sleep(_retry_delay_from(str(e), attempt))
+            if vectors is None:
+                return None
+            out.extend(vectors)
+        return out
+
 
 class NullProvider(BaseProvider):
     """
@@ -242,9 +332,31 @@ class GeminiProvider(BaseProvider):
     name = "gemini"
     ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+    EMBED_ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                      "{model}:batchEmbedContents")
+
     def __init__(self, model: str | None = None) -> None:
         super().__init__(model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.embed_model = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
+
+    def _raw_embed(self, texts: list[str], task_type: str) -> list[list[float]]:
+        r = requests.post(
+            self.EMBED_ENDPOINT.format(model=self.embed_model),
+            headers={"x-goog-api-key": self.api_key,
+                     "Content-Type": "application/json"},
+            json={"requests": [{
+                "model": f"models/{self.embed_model}",
+                "content": {"parts": [{"text": t}]},
+                "taskType": task_type,
+                # 768 維：檢索品質與儲存成本的折衷，對幾百張卡片的知識庫綽綽有餘
+                "outputDimensionality": 768,
+            } for t in texts]},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        return [e["values"] for e in r.json()["embeddings"]]
 
     @property
     def available(self) -> bool:
@@ -289,6 +401,20 @@ class OpenAIProvider(BaseProvider):
     def __init__(self, model: str | None = None) -> None:
         super().__init__(model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        self.embed_model = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+
+    def _raw_embed(self, texts: list[str], task_type: str) -> list[list[float]]:
+        # OpenAI 的 embedding 不區分文件／查詢，task_type 在此忽略
+        r = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"},
+            json={"model": self.embed_model, "input": texts},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        return [d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"])]
 
     @property
     def available(self) -> bool:
