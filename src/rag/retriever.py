@@ -97,9 +97,9 @@ class HybridRetriever:
             return False
 
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        fname = f"embeddings_{self.provider.name}_{self.provider.embed_model}.json"
-        cache_path = INDEX_DIR / fname
-        cache = self._load_json(SEED_DIR / fname)
+        stem = f"embeddings_{self.provider.name}_{self.provider.embed_model}"
+        cache_path = INDEX_DIR / f"{stem}.json"
+        cache = self._load_seed_vectors(SEED_DIR / f"{stem}.npz")
         cache.update(self._load_json(cache_path))   # 本機快取優先於種子
 
         missing = [c for c in self.cards if c.content_hash not in cache]
@@ -125,6 +125,41 @@ class HybridRetriever:
         self._query_disk.update(self._load_json(self._query_cache_path))
         self.semantic_ready = True
         return True
+
+    @staticmethod
+    def _load_seed_vectors(path: Path) -> dict[str, list[float]]:
+        """
+        讀取二進位種子向量。
+
+        用 float32 的 npz 而非 JSON：檢索時本來就轉成 float32 運算，
+        存 float32 不損失任何實際使用到的精度，檔案卻小了約五倍。
+        """
+        if not path.exists():
+            return {}
+        try:
+            data = np.load(path, allow_pickle=False)
+            return {str(h): v.tolist() for h, v in zip(data["hashes"], data["vectors"])}
+        except (OSError, KeyError, ValueError):
+            return {}
+
+    def export_seed(self, seed_dir: Path, queries: list[str]) -> dict:
+        """匯出目前知識庫的向量與指定問題的查詢向量，作為部署用種子。"""
+        if not self.semantic_ready:
+            raise RuntimeError("語意索引尚未建立，無法匯出種子")
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"embeddings_{self.provider.name}_{self.provider.embed_model}"
+        hashes = np.array([c.content_hash for c in self.cards])
+        vectors = np.array([self._doc_cache[c.content_hash] for c in self.cards],
+                           dtype=np.float32)
+        np.savez_compressed(seed_dir / f"{stem}.npz", hashes=hashes, vectors=vectors)
+
+        for q in queries:
+            self.semantic(q, k=1)          # 確保查詢向量已計算並落地
+        qdump = {q: np.asarray(self._query_disk[q], dtype=np.float32).tolist()
+                 for q in queries if q in self._query_disk}
+        (seed_dir / self._query_cache_path.name).write_text(
+            json.dumps(qdump, ensure_ascii=False), encoding="utf-8")
+        return {"cards": len(self.cards), "queries": len(qdump)}
 
     @staticmethod
     def _load_json(path: Path) -> dict:

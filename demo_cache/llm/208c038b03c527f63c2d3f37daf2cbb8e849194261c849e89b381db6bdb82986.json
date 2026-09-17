@@ -1,0 +1,1 @@
+{"text": "{\n  \"records\": [\n    {\n      \"po_no\": \"PO-2026-04466\",\n      \"new_eta\": null,\n      \"raw_date_text\": \"30-Sep-2026\",\n      \"commitment_strength\": \"confirmed\",\n      \"change_type\": \"no_change\",\n      \"reason_code\": \"not_stated\",\n      \"confidence\": 1.0,\n      \"notes\": \"供應商確認如期交貨，無變更\"\n    }\n  ]\n}"}

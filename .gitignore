@@ -2,6 +2,7 @@
 .env
 .env.local
 *.key
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
@@ -12,9 +13,13 @@ venv/
 .ipynb_checkpoints/
 
 # 產出物（可由程式重新生成，不需版控）
-output/
 data/*.csv
 data/inbox/
+
+# 評估報告例外：它們是設計決策的證據，需要實際呼叫 API 才能重新產生，
+# 雲端展示時無法現場重跑，因此以快照形式納入版控
+output/*
+!output/*.md
 
 # OS
 Thumbs.db

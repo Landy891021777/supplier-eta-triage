@@ -24,6 +24,16 @@ from rag.retriever import Hit, HybridRetriever
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "rag_answer.md"
 CITATION_RE = re.compile(r"\[((?:PO|MAT|SUP|SUM|DOC):[^\]\s]+)\]")
 
+# 介面上的範例問題。放在這裡而非 app.py，讓匯出種子快取的腳本也能取用。
+EXAMPLE_QUESTIONS = [
+    "PO-2026-04205 的供應商可靠嗎？這張單現在緊不緊急？",
+    "哪家供應商最常延遲交貨？",
+    "哪些料缺了沒辦法找別家救？",
+    "快要趕不上生產的訂單有哪些？",
+    "工具會不會自動幫我改 SAP 的交期？",
+    "為什麼不是每封信都丟給 AI 讀？",
+]
+
 
 def build_prompt(question: str, hits: list[Hit], reference_date: str) -> str:
     context = "\n\n".join(

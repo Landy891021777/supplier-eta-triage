@@ -59,10 +59,20 @@ def _ensure_data() -> None:
         with st.spinner("首次啟動：正在產生合成資料…"):
             generate_data.main()
     # 模擬 ERP 資料庫同樣是可重新生成的產物，不進版控，因此也要自動補上。
-    if not (ROOT / "data" / "erp_sim.db").exists():
+    db = ROOT / "data" / "erp_sim.db"
+    if not db.exists():
         import build_erp_db
         with st.spinner("首次啟動：正在建立模擬 ERP 資料庫…"):
             build_erp_db.build(verbose=False)
+    # 歷史單據與收貨紀錄：供應商歷史、權重校準與檢索摘要卡都依賴它。
+    # 踩坑紀錄：原本只建了資料庫沒補歷史，雲端上這三塊會整片空白。
+    import sqlite3
+    with sqlite3.connect(db) as con:
+        has_history = con.execute("SELECT COUNT(*) FROM goods_receipt").fetchone()[0] > 0
+    if not has_history:
+        import generate_history
+        with st.spinner("首次啟動：正在產生歷史單據與收貨紀錄…"):
+            generate_history.build_history(verbose=False)
 
 
 def main() -> None:
@@ -272,7 +282,14 @@ def main() -> None:
                         st.caption(f"{row['email_id']}｜{row['subject']}")
                         st.text(str(row.get("notes", ""))[:400])
                         if st.button("產生回信草稿", key=f"draft-{row['po_no']}"):
-                            text, src = draft_mod.generate(row.to_dict())
+                            # 額度用完時改用規則式模板：草稿照樣產出，只是不再消耗 API 配額
+                            draft_provider = get_provider() if _llm_budget_left() > 0 else None
+                            text, src = draft_mod.generate(
+                                row.to_dict(),
+                                provider=draft_provider if draft_provider else _NoLLM())
+                            if "ms）" in src and "（0 ms）" not in src:
+                                st.session_state["llm_live_calls"] = (
+                                    st.session_state.get("llm_live_calls", 0) + 1)
                             st.caption(f"來源：{src}")
                             st.text_area("草稿（寄出前請自行確認語氣）", text,
                                          height=280, key=f"ta-{row['po_no']}")
@@ -498,14 +515,8 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 # 物料智能檢索
 # ---------------------------------------------------------------------------
-RAG_EXAMPLES = [
-    "PO-2026-04205 的供應商可靠嗎？這張單現在緊不緊急？",
-    "哪家供應商最常延遲交貨？",
-    "哪些料缺了沒辦法找別家救？",
-    "快要趕不上生產的訂單有哪些？",
-    "工具會不會自動幫我改 SAP 的交期？",
-    "為什麼不是每封信都丟給 AI 讀？",
-]
+from rag.answer import EXAMPLE_QUESTIONS as RAG_EXAMPLES  # noqa: E402
+from llm.provider import NullProvider as _NoLLM  # noqa: E402
 RETRIEVAL_LABEL = {"pinned": "識別碼精確比對", "semantic": "語意相近",
                    "lexical": "字詞相符", "hybrid": "綜合排序"}
 # 公開展示時的保護：每位訪客在一次工作階段內最多觸發的「未快取」LLM 呼叫次數。
