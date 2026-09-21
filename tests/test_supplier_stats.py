@@ -83,6 +83,30 @@ def test_conservative_eta_rejects_unparseable_date():
     assert r["available"] is False
 
 
+def test_nan_delay_days_are_ignored_and_not_counted():
+    """
+    髒資料（收貨紀錄缺日期）不該悄悄拉低樣本門檻，也不該混進百分位計算。
+    25 筆改期單裡有 5 筆是 NaN，應視為只有 20 筆可用資料。
+    """
+    df = _outcomes([("A", 10, 2)] * 20 + [("A", float("nan"), 2)] * 5)
+    est = supplier_stats.estimate_delay(df, "A", percentile=0.80)
+    assert est["available"] and est["basis"] == "改期過的單"
+    assert est["n"] == 20 and est["delay_days"] == 10
+
+
+def test_object_dtype_with_none_does_not_raise():
+    """
+    有些來源（例如手動組的 DataFrame）欄位是 object dtype、混了 None，
+    不是乾淨的數值欄；估計函式不該因此丟例外。
+    """
+    df = pd.DataFrame(
+        {"supplier_id": ["A"] * 25,
+         "delay_days": pd.array([10] * 20 + [None] * 5, dtype=object),
+         "reschedule_count": [2] * 25})
+    est = supplier_stats.estimate_delay(df, "A", percentile=0.80)
+    assert est["available"] and est["n"] == 20 and est["delay_days"] == 10
+
+
 # ---------------------------------------------------------------------------
 # 讀真實（模擬）資料庫
 # ---------------------------------------------------------------------------

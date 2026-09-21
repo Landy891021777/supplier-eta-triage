@@ -259,7 +259,7 @@ def main() -> None:
                             st.markdown("**供應商歷史表現（近 12 個月）**")
                             if hist.get("available"):
                                 st.metric("保守到料日（歷史 P80）", hist["conservative"],
-                                          delta=f"較承諾日 +{hist['p80_delay']} 天",
+                                          delta=f"較承諾日 +{hist['delay_days']} 天",
                                           delta_color="inverse")
                                 st.caption(hist["note"] + "。此為歷史統計，非預測模型。")
                             else:
@@ -603,6 +603,12 @@ def _reschedule_reliability():
     return supplier_stats.reschedule_reliability()
 
 
+@st.cache_data(show_spinner=False)
+def _outcomes():
+    import supplier_stats
+    return supplier_stats.load_outcomes()
+
+
 def _supplier_history(supplier_id, promised):
     """查供應商歷史表現；沒有歷史資料時安靜略過，不讓畫面壞掉。"""
     if not supplier_id or not promised:
@@ -610,7 +616,7 @@ def _supplier_history(supplier_id, promised):
     try:
         import supplier_stats
         return supplier_stats.conservative_eta(
-            supplier_id, promised, _supplier_performance())
+            supplier_id, promised, _outcomes())
     except (FileNotFoundError, RuntimeError):
         return None
 

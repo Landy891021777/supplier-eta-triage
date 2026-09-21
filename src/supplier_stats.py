@@ -101,9 +101,13 @@ def supplier_performance(df: pd.DataFrame | None = None,
                    .groupby("supplier_id")["ok"].mean().round(3)),
         "延遲時中位數(天)": (df[df["delay_days"] > 0]
                             .groupby("supplier_id")["delay_days"].median()),
-        "P80 延遲(天)": g.quantile(0.80).round(0),
+        "P80 延遲(天)": g.quantile(0.80, interpolation="higher").round(0),
         "最長延遲(天)": g.max(),
     })
+    # 領域假設：這兩欄與 estimate_delay() 用同一個母體（改期過的單），
+    # 讓畫面上的數字跟保守到料日的估計基礎一致，不會兩邊對不上。
+    # 全部欄位的 P80 都採 interpolation="higher"：取實際出現過的天數，
+    # 不做內插，畫面上每一個 P80 都是真的發生過的落差、彼此可比較。
     resched = df[df["reschedule_count"] >= 1].groupby("supplier_id")["delay_days"]
     out["改期單樣本數"] = resched.size().reindex(out.index).fillna(0).astype(int)
     out["改期單 P80 延遲(天)"] = (
@@ -129,6 +133,8 @@ def estimate_delay(outcomes: pd.DataFrame, supplier_id: str, *,
     天數，不做內插，說出來的「N 天」一定是真的發生過的落差。
     """
     mine = outcomes[outcomes["supplier_id"] == supplier_id]
+    # 領域假設：收貨紀錄不該有空日期；這行是防禦，避免單筆髒資料讓整個估計崩潰。
+    mine = mine[pd.to_numeric(mine["delay_days"], errors="coerce").notna()]
     rescheduled = mine[mine["reschedule_count"] >= 1]
     if len(rescheduled) >= min_samples:
         pool, basis = rescheduled, "改期過的單"
@@ -137,7 +143,8 @@ def estimate_delay(outcomes: pd.DataFrame, supplier_id: str, *,
     else:
         return {"available": False, "n": int(len(mine)),
                 "reason": f"歷史樣本不足（{len(mine)} 筆），不提供保守估計"}
-    days = int(np.quantile(pool["delay_days"].to_numpy(), percentile, method="higher"))
+    values = pd.to_numeric(pool["delay_days"], errors="coerce").to_numpy(dtype=float)
+    days = int(np.quantile(values, percentile, method="higher"))
     return {"available": True, "delay_days": max(0, days),
             "percentile": percentile, "basis": basis, "n": int(len(pool))}
 
