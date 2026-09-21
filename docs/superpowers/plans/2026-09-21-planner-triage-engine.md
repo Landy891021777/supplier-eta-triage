@@ -628,6 +628,11 @@ EOF
 
 ### Task 3: 分級與建議動作（`triage.py`）
 
+> **執行後修正（2026-09-21）：** 審查找到四個邏輯漏洞並已修正，實際程式以 repo 為準，
+> 下方程式碼是原始版本：(1) 提前交貨但仍晚於需求日要照常分級；
+> (2) 非延遲且讀不出新日期 → 待查；(3) 沒給新日期時理由寫「原承諾日」、緩衝註明不能當真；
+> (4) 每張 P1/P2 至少一個建議動作，沒給日期一律先追日期，「通知生管」提前。
+
 **Files:**
 - Create: `src/triage.py`
 - Test: `tests/test_triage.py`
@@ -1567,7 +1572,10 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
 (e) 把 `result = evaluate(rec, po, material, supplier, weights, thresholds)` 換成：
 
 ```python
-            pct = triage.percentile_for(rec.get("commitment_strength"), tcfg)
+            # 信裡沒給新日期時，不論模型把承諾強度判成什麼，都取最保守的百分位。
+            strength = (rec.get("commitment_strength") if rec.get("new_eta")
+                        else "none")
+            pct = triage.percentile_for(strength, tcfg)
             estimate = estimate_delay(outcomes, po["supplier_id"], percentile=pct,
                                       min_samples=int(tcfg["min_samples"]))
             result = triage.evaluate(rec, po, material, tcfg, estimate)
