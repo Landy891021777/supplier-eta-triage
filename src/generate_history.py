@@ -2,28 +2,21 @@
 """
 產生「歷史單據與實際結果」，寫入模擬 ERP 資料庫。
 
-===========================  這支程式補上什麼  ===========================
-先前的模擬 ERP 只有「未結採購單」—— 也就是還沒到料、還在追的單。
-`goods_receipt`（收貨紀錄）刻意留空，因為那代表「後來到底怎麼了」。
-
-沒有那張表，就沒有 outcome；沒有 outcome，規則權重只能靠人訂。
-
+先前的模擬 ERP 只有「未結採購單」。`goods_receipt`（收貨紀錄）代表
+「後來到底怎麼了」，沒有它就無法從歷史推導供應商準交率與到料估計。
 這支程式補上過去 12 個月的歷史單據：請購 → 採購 → 交貨排程 →
-改期紀錄 → **實際收貨**。有了它，`src/calibrate.py` 才能回答
-「資料同不同意我訂的那十條權重」。
+改期紀錄 → 實際收貨。
 
 ===========================  必須先說的話  ===========================
 **這些歷史結果是我用一組因果規則產生的，不是真實資料。**
 
-因此拿它去「學」出來的權重，本質上是在還原我自己寫進去的假設。
-數字沒有外部效力，**它證明的是校準流程能跑，不是校準結果可信。**
+它的用途是讓「歷史落差 → 保守到料日 → 回測」這條流程有資料可跑。
+回測（src/backtest.py）驗證的是方法有沒有偷看未來、估計有沒有校準，
+**不能證明真實供應商會照這種分布行動。**
 
-那為什麼還要做？因為在面試或提案時，「機制我寫好了，缺的只是三個月
-真實收貨紀錄」跟「未來可以做」是完全不同量級的兩句話。
-
-我刻意讓下面的因果規則**不等於**評分卡的十條規則 ——
-例如評分卡看「緩衝天數」，但世界其實是照「供應商體質 × 季末 × 累犯」
-在運作。這樣校準才會產生真正的分歧，而不是照鏡子。
+為了讓時間切分回測有意義，部分供應商的表現會隨時間變好或變差
+（見 SUPPLIER_DRIFT）。若整年都是同一個固定分布，涵蓋率必然接近設定值，
+驗證就沒有意義。
 =====================================================================
 """
 from __future__ import annotations
@@ -79,9 +72,18 @@ CATEGORY_RISK = {
     "MASK": 0.02,
 }
 
+# 領域假設：供應商的交付表現不是固定不變的。
+# 現實中會因為產能重分配、換廠、良率改善而變好或變差。
+# from：從這天起（以承諾日計）表現改變；p_late：延遲機率的加減量；
+# delay_mult：延遲時的天數倍率。
+SUPPLIER_DRIFT = {
+    "SUP-S02": {"from": date(2026, 3, 1), "p_late": +0.25, "delay_mult": 1.4},  # 變差
+    "SUP-F03": {"from": date(2026, 4, 1), "p_late": -0.22, "delay_mult": 0.8},  # 改善
+}
 
-def _simulate_outcome(rng: random.Random, *, otd_rate: float, category: str,
-                      is_bottleneck: bool, reschedule_count: int,
+
+def _simulate_outcome(rng: random.Random, *, vendor_id: str, otd_rate: float,
+                      category: str, is_bottleneck: bool, reschedule_count: int,
                       committed: date, qty: int) -> int:
     """
     回傳「實際到料日 − 承諾日」的天數（負值代表提前到料）。
@@ -99,6 +101,10 @@ def _simulate_outcome(rng: random.Random, *, otd_rate: float, category: str,
         p_late += 0.10
     if qty >= 5000:
         p_late += 0.04                      # 大批量較難一次做完
+    drift = SUPPLIER_DRIFT.get(vendor_id)
+    drift_on = bool(drift and committed >= drift["from"])
+    if drift_on:
+        p_late += drift["p_late"]
     p_late = max(0.02, min(0.92, p_late))
 
     if rng.random() >= p_late:
@@ -112,6 +118,8 @@ def _simulate_outcome(rng: random.Random, *, otd_rate: float, category: str,
     base *= (1.0 + 0.12 * reschedule_count)
     if category == "SUBSTRATE":
         base *= 1.4
+    if drift_on:
+        base *= drift["delay_mult"]
     return max(1, int(round(base)))
 
 
@@ -141,16 +149,17 @@ def _clear_previous_history(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-def build_history(verbose: bool = True) -> dict:
-    if not DB_PATH.exists():
+def build_history(verbose: bool = True, db_path: Path | str | None = None) -> dict:
+    path = Path(db_path or DB_PATH)
+    if not path.exists():
         raise FileNotFoundError(
-            f"找不到 {DB_PATH}，請先執行： py src/build_erp_db.py")
+            f"找不到 {path}，請先執行： py src/build_erp_db.py")
 
     cfg = _load_cfg()
     as_of = date.fromisoformat(cfg["data_generation"]["as_of_date"])
     rng = random.Random(SEED)
 
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     _clear_previous_history(con)
 
@@ -197,7 +206,7 @@ def build_history(verbose: bool = True) -> dict:
         # 這張單其實是在途單，不屬於歷史 —— 硬寫進去會多出一批沒有結果的
         # 採購單，混進今日行動清單，讓「在途單」的集合莫名其妙變多。
         delta = _simulate_outcome(
-            rng, otd_rate=float(v["otd_rate"] or 0.85), category=m["category"],
+            rng, vendor_id=vid, otd_rate=float(v["otd_rate"] or 0.85), category=m["category"],
             is_bottleneck=bool(m["is_bottleneck"]), reschedule_count=n_resched,
             committed=committed, qty=qty)
         receipt = committed + timedelta(days=delta)
@@ -252,7 +261,7 @@ def build_history(verbose: bool = True) -> dict:
     con.close()
 
     if verbose:
-        print(f"[OK] 歷史單據已寫入 {DB_PATH.name}")
+        print(f"[OK] 歷史單據已寫入 {path.name}")
         for k, val in stats.items():
             print(f"       {k:<20} {val:>6}")
         if late and late[2]:
@@ -262,7 +271,7 @@ def build_history(verbose: bool = True) -> dict:
                   f"({late[1] / late[2] * 100:.1f}%)  <- 真正造成缺料的")
         print()
         print("       提醒：這些結果由因果模型產生，非真實資料。")
-        print("       用它校準出的權重只能證明流程可跑，不能用於決策。")
+        print("       回測只能證明方法可行，不能證明真實供應商的行為。")
     return stats
 
 
