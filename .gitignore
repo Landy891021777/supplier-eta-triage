@@ -36,3 +36,6 @@ Thumbs.db
 
 # 模擬 ERP 資料庫（可由 build_erp_db.py 重新產生）
 data/*.db
+
+# Claude Code 個人偏好（不進版控）
+CLAUDE.local.md
