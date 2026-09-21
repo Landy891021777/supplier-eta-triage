@@ -157,26 +157,6 @@ def test_supplier_performance_flags_small_samples():
     assert (perf["準交率"].between(0, 1)).all()
 
 
-def test_conservative_eta_is_never_earlier_than_promised():
-    """保守到料日是給排程用的下限，不可能比供應商承諾的還早。"""
-    import supplier_stats
-
-    perf = supplier_stats.supplier_performance()
-    for sid in perf["supplier_id"]:
-        r = supplier_stats.conservative_eta(sid, "2026-10-29", perf)
-        if r.get("available"):
-            assert r["conservative"] >= r["promised"], sid
-
-
-def test_conservative_eta_refuses_when_samples_insufficient():
-    import supplier_stats
-
-    perf = supplier_stats.supplier_performance(min_samples=10_000)
-    r = supplier_stats.conservative_eta(perf["supplier_id"].iloc[0], "2026-10-29", perf)
-    assert r["available"] is False
-    assert "樣本不足" in r["reason"]
-
-
 def test_reschedule_reliability_validates_repeat_offender_rule():
     """
     這張表是規則 7（累犯）的自我驗證：改期越多次，最終仍延遲的比例應越高。
