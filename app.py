@@ -53,26 +53,13 @@ def _ensure_data() -> None:
     `data/` 被 .gitignore 排除（它是可重新生成的產物，不該進版控），
     因此雲端部署後第一次啟動會找不到資料。與其要求使用者先跑一次
     指令，不如讓工具自己補上 —— 導入的第一步不該卡在環境設定。
+
+    實際邏輯在 src/bootstrap.py。踩坑紀錄：原本用「資料庫檔案存在」當作
+    「準備好了」，雲端首次載入時兩個工作階段重疊，第二個會撞上建到一半的
+    資料庫而整個打不開；也曾因為只建了資料庫沒補歷史，讓三個分頁整片空白。
     """
-    if not (ROOT / "data" / "po_master.csv").exists():
-        import generate_data
-        with st.spinner("首次啟動：正在產生合成資料…"):
-            generate_data.main()
-    # 模擬 ERP 資料庫同樣是可重新生成的產物，不進版控，因此也要自動補上。
-    db = ROOT / "data" / "erp_sim.db"
-    if not db.exists():
-        import build_erp_db
-        with st.spinner("首次啟動：正在建立模擬 ERP 資料庫…"):
-            build_erp_db.build(verbose=False)
-    # 歷史單據與收貨紀錄：供應商歷史、權重校準與檢索摘要卡都依賴它。
-    # 踩坑紀錄：原本只建了資料庫沒補歷史，雲端上這三塊會整片空白。
-    import sqlite3
-    with sqlite3.connect(db) as con:
-        has_history = con.execute("SELECT COUNT(*) FROM goods_receipt").fetchone()[0] > 0
-    if not has_history:
-        import generate_history
-        with st.spinner("首次啟動：正在產生歷史單據與收貨紀錄…"):
-            generate_history.build_history(verbose=False)
+    import bootstrap
+    bootstrap.ensure_data(ROOT, step=st.spinner)
 
 
 def main() -> None:
