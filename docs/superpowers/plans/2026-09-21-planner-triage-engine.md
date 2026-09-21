@@ -48,7 +48,7 @@ Plan 2、Plan 3 要等 Plan 1 完成後，依實際程式與回測數字才寫�
 - 註解寫「為什麼」，繁體中文；領域假設一律標 `# 領域假設：`。
 - 測試 docstring 要寫出「錯了會怎樣」。
 - Commit 用中文 conventional commits，結尾加：
-  `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`
+  `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`
 - 所有涉及 API 的動作在本計畫都不會發生。若任何步驟開始呼叫 Gemini，立刻停下。
 
 ---
@@ -82,6 +82,10 @@ Expected: `NullProvider`。若印出別的名稱，停下來，`_load_dotenv` �
 ---
 
 ### Task 1: 歷史資料加入「供應商表現隨時間變化」
+
+> **執行後修正（2026-09-21）：** 審查發現兩個資料庫層級的漂移測試在每邊約 35 筆樣本下，
+> 換亂數種子約 21% 會失敗。已另加與種子無關的測試（直接對 `_simulate_outcome` 抽兩萬次），
+> 資料庫層級測試降為方向性檢查。見 commit `02bb548`。
 
 **為什麼先做：** 回測的意義在於「過去的落差能不能預測未來」。若整年都是同一個固定分布，涵蓋率必然接近設定值，驗證等於白送。
 
@@ -299,7 +303,7 @@ feat(history): 歷史資料加入供應商表現隨時間變化
 接近設定值，驗證等於白送。SUP-S02 從 2026-03 起變差、SUP-F03 從 2026-04
 起變好；build_history 可指定資料庫路徑，測試在副本上跑，不動真實資料庫。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -616,7 +620,7 @@ feat(supplier-stats): 到料落差只用改期過的單估計
 這種單的風險。改期單樣本不足 20 筆時退回全部單並標明母體，全部單也不足
 就回報樣本不足。歷史查詢多帶通知日與需求日，供回測使用。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -756,6 +760,18 @@ def test_pull_in_is_p3_with_warehouse_note():
 def test_missing_need_date_is_flagged_not_guessed():
     r = _run(po={"need_date": None})
     assert r["priority"] == "待查" and r["gap_days"] is None
+
+
+def test_delay_without_new_date_is_never_left_at_p3():
+    """
+    供應商說會延、卻沒給新日期時，只能拿原承諾日去算，缺料天數一定被低估。
+    這種單最需要企劃立刻追日期，不能因為「看起來還有緩衝」就掉到 P3。
+    """
+    r = _run(new_eta=None, est=_est(0),
+             rec={"commitment_strength": CommitmentStrength.NONE.value})
+    assert r["priority"] in ("P1", "P2")
+    assert "未給新日期" in r["reasons"][0]
+    assert "確切日期" in r["actions"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -1009,6 +1025,13 @@ def evaluate(record: dict, po: dict, material: dict, triage_cfg: dict,
     if priority == "P2" and gap <= 0:
         reasons.append(f"單一來源且緩衝只剩 {-gap} 天（門檻 {tight} 天）")
 
+    # 供應商說會延但沒給日期：上面只能拿原承諾日算，缺料天數必然被低估。
+    # 這種單最需要企劃立刻追日期，至少排 P2，不能因為「看似有緩衝」而被放掉。
+    if change == ChangeType.DELAY.value and _d(record.get("new_eta")) is None:
+        reasons.insert(0, "供應商表示會延遲但未給新日期；以下以原承諾日估計，實際可能更晚")
+        if priority == "P3":
+            priority = "P2"
+
     return {**out, "priority": priority, "gap_days": gap,
             "conservative_eta": conservative.isoformat(),
             "delay_days_est": delay,
@@ -1037,7 +1060,7 @@ feat(triage): 以預估缺料天數分級並給出建議動作
 旗標。建議動作遵守 AVL：替代料未驗證前只寫「請品保確認」，詢價寫成
 「與採購確認」，不寫成本與可行性。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -1355,7 +1378,7 @@ feat(backtest): 時間切分回測，驗證估計方法而非學權重
 未來。報涵蓋率（P80/P90/P95）與排序前段命中率，並對照兩個簡單基準與
 隨機。合成資料上只能驗證方法，報告開頭已聲明；沒贏基準就如實寫沒贏。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -1770,7 +1793,7 @@ refactor: 以預估缺料天數分級取代十條加權分數與權重校準
 它仍可運作，介面重排留給下一份計畫。README 與 CLAUDE.md 暫時仍描述
 舊做法，之後統一更新。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -1853,7 +1876,7 @@ docs: 新增時間切分回測結果
 
 數字由 src/backtest.py 實際跑出，合成資料上只驗證方法。
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 ```
 
@@ -1937,7 +1960,7 @@ git add docs/設計決策.md
 git commit -F - <<'EOF'
 docs: 新增決策 16，記錄放棄加權分數的原因與被否決的替代方案
 
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
 git log --oneline | head -8
 ```
