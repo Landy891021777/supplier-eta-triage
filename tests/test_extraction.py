@@ -109,3 +109,22 @@ def test_original_label_does_not_poison_next_line():
     text = "Original ETA : 2026-09-25\nRevised ETA  : 2026-10-09\n"
     pos = text.index("2026-10-09")
     assert extract_rules._nearest_label(text, pos) == "new"
+
+
+def test_score_email_counts_false_confirmed_separately():
+    """
+    把託辭判成「已確認」是本工具最危險的錯，必須單獨算出來。
+    只看 strength_ok 的話，它跟「暫估判成僅意向」這種無害的錯被算成一樣。
+    """
+    import evaluate
+    truth = [{"po_no": "A", "commitment_strength": "intent_only", "change_type": "delay",
+              "new_eta": "2026-10-31"},
+             {"po_no": "B", "commitment_strength": "estimated", "change_type": "delay",
+              "new_eta": "2026-10-20"}]
+    pred = [{"po_no": "A", "commitment_strength": "confirmed", "change_type": "delay",
+             "new_eta": "2026-10-31"},
+            {"po_no": "B", "commitment_strength": "intent_only", "change_type": "delay",
+             "new_eta": "2026-10-20"}]
+    s = evaluate.score_email(pred, truth)
+    assert s["strength_ok"] == 0.0
+    assert s["false_confirmed"] == 1
