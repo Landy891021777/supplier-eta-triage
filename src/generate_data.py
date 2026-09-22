@@ -28,12 +28,14 @@ from pathlib import Path
 import yaml
 
 try:  # 允許以 `python src/generate_data.py` 或 `python -m src.generate_data` 執行
-    from .domain import CATEGORY_SUPPLIER_TYPE, MaterialCategory, SupplierType
+    from .domain import (CATEGORY_SPEC, CATEGORY_SUPPLIER_TYPE, CATEGORY_WEIGHTS,
+                         MaterialCategory, SupplierType)
     from .handcrafted_emails import HANDCRAFTED
 except ImportError:  # pragma: no cover
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from domain import CATEGORY_SUPPLIER_TYPE, MaterialCategory, SupplierType
+    from domain import (CATEGORY_SPEC, CATEGORY_SUPPLIER_TYPE, CATEGORY_WEIGHTS,
+                        MaterialCategory, SupplierType)
     from handcrafted_emails import HANDCRAFTED
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -108,19 +110,9 @@ NODES = ["N7", "N12", "N16", "N22", "N28"]
 PRODUCT_CODES = ["XR3390", "KL2210", "MT8195", "AB7710", "CD4420",
                  "EF9930", "GH1180", "IJ6650", "KL7720", "MN3310"]
 
-# 領域假設：各料別的標準前置期、計量單位與常見下單量。
-#   前置期是「下單到到廠」的合約天數；12 吋矽晶圓與靶材最長，化學品最短。
-CATEGORY_SPEC = {
-    "SILICON_WAFER": {"lt": (60, 120), "uom": "PCS", "qty": [500, 1000, 1500, 2000, 3000, 5000]},
-    "PHOTORESIST":   {"lt": (30, 90),  "uom": "GAL", "qty": [20, 40, 80, 120, 200]},
-    "SPECIALTY_GAS": {"lt": (20, 60),  "uom": "CYL", "qty": [10, 20, 40, 60, 100]},
-    "WET_CHEMICAL":  {"lt": (10, 30),  "uom": "DRM", "qty": [20, 40, 80, 160]},
-    "TARGET":        {"lt": (45, 100), "uom": "PCS", "qty": [2, 4, 8, 12, 20, 30]},
-    "MASK":          {"lt": (14, 35),  "uom": "PCS", "qty": [1]},
-    "CMP_SLURRY":    {"lt": (20, 50),  "uom": "GAL", "qty": [50, 100, 200, 400]},
-}
-CATEGORY_WEIGHTS = {"SILICON_WAFER": .25, "PHOTORESIST": .15, "SPECIALTY_GAS": .15,
-                    "WET_CHEMICAL": .15, "TARGET": .10, "MASK": .10, "CMP_SLURRY": .10}
+# CATEGORY_SPEC／CATEGORY_WEIGHTS 定義在 domain.py（單一事實來源）：
+# generate_history.py 產生歷史單的數量與大批量判斷也要用同一份表，
+# 兩處各寫一份會走鐘——這正是「歷史單數量跟料別對不起來」這個 bug 的成因。
 
 
 def _new_material_id(cat: str) -> str:
@@ -240,12 +232,17 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
                 "gr_processing_days": gr_days[MaterialCategory.SILICON_WAFER.value],
             }
             materials.append(by_id[mid])
+        # 領域假設：下單日 = 承諾日往前推「標準前置期＋一點下單前置作業
+        #   （0-14 天）」，不是跟 as_of 綁死的固定區間——固定 30-120 天
+        #   會讓矽晶圓（前置期常常就超過 90 天）看起來像壓線下單。
+        lt = int(by_id[mid]["std_lead_time_days"])
         rows.append({
             "po_no": po, "material_id": mid, "supplier_id": sup, "qty": qty,
             "committed_date": committed, "need_date": need,
             "downstream_scheduled": sched, "reschedule_count": resched,
             "share_of_period_demand": share,
-            "po_created_date": (as_of - timedelta(days=random.randint(30, 120))).isoformat(),
+            "po_created_date": (date.fromisoformat(committed)
+                               - timedelta(days=lt + random.randint(0, 14))).isoformat(),
         })
 
     seq = 4600
@@ -258,9 +255,15 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
         sup = random.choice(cands)["supplier_id"]
 
         committed = as_of + timedelta(days=random.randint(-10, 100))
-        # 領域假設：緩衝天數多半落在 0-30 天；瓶頸料的緩衝通常更薄，
-        #   因為它們排程壓得緊，沒有多餘空間。這個相關性刻意做進去。
-        buffer_days = random.randint(0, 12) if m["is_bottleneck"] else random.randint(3, 35)
+        # 領域假設：MRP 排需求日時已經扣掉收貨處理時間，所以正常情況下
+        #   承諾日至少要比需求日早「收貨處理天數」，不能比它還晚——
+        #   否則等於 MRP 排的需求日打從一開始就沒扣到這段處理時間。
+        #   瓶頸料的緩衝通常更薄，因為排程壓得緊，沒有多餘空間；
+        #   這個相關性刻意做進去。
+        gr = int(gr_days.get(m["category"], 0))
+        buffer_days = (random.randint(gr, max(gr, 12)) if m["is_bottleneck"]
+                      else random.randint(max(3, gr), 35))
+        lt = int(m["std_lead_time_days"])
         rows.append({
             "po_no": f"PO-2026-{seq:05d}",
             "material_id": m["material_id"],
@@ -274,7 +277,7 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
             #   而且改過的更容易再改（這正是「累犯」規則存在的理由）。
             "reschedule_count": random.choices([0, 1, 2, 3, 4], weights=[0.55, 0.22, 0.13, 0.07, 0.03])[0],
             "share_of_period_demand": round(random.uniform(0.15, 1.0), 2),
-            "po_created_date": (as_of - timedelta(days=random.randint(30, 150))).isoformat(),
+            "po_created_date": (committed - timedelta(days=lt + random.randint(0, 14))).isoformat(),
         })
     return rows
 

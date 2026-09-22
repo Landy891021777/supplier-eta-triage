@@ -29,11 +29,23 @@ from pathlib import Path
 
 import yaml
 
+try:  # 允許以 `python src/generate_history.py` 或 `python -m src.generate_history` 執行
+    from .domain import CATEGORY_SPEC
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from domain import CATEGORY_SPEC
+
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "erp_sim.db"
 
 HISTORY_MONTHS = 12
-N_HISTORY = 900
+# 領域假設修正後的副作用：數量改成依料別抽（見 I-1，跟 generate_data.py
+# 用同一份 domain.CATEGORY_SPEC），list 長度不同會讓 random.choice 消耗
+# 的亂數位元數跟著變，整條亂數序列因此跟舊版不同——SUP-W03 漂移前窗口的
+# 樣本數從原本 35 張左右掉到 14 張，低於方向性測試要求的 15 張門檻。
+# 900 → 950 只是把總樣本數調高，補回同一個供應商 × 同一段時間窗口該有
+# 的樣本量，不是為了讓測試變綠而調漂移量或門檻本身。
+N_HISTORY = 950
 SEED = 20260101
 
 
@@ -99,8 +111,16 @@ def _simulate_outcome(rng: random.Random, *, vendor_id: str, otd_rate: float,
     p_late += min(0.20, 0.06 * reschedule_count)   # 領域假設：改過期的更容易再改
     if _is_quarter_end(committed):
         p_late += 0.10
-    if qty >= 5000:
-        p_late += 0.04                      # 大批量較難一次做完
+    # 領域假設：該料別最大的常見下單量較難一次做完；光罩一次一片，
+    #   不適用（CATEGORY_SPEC["MASK"]["qty"] 只有一個選項，len(opts) > 1
+    #   為 False，不會被判成大批量）。改用「這個料別自己的最大選項」而
+    #   不是寫死的 5000，因為 5000 對矽晶圓是常態、對光阻卻是不可能出現
+    #   的數字——寫死的門檻等於讓每個料別的「大批量」機率各自不同、
+    #   卻沒人刻意這樣設計過。
+    opts = CATEGORY_SPEC.get(category, {}).get("qty", [])
+    large = len(opts) > 1 and qty == max(opts)
+    if large:
+        p_late += 0.04
     drift = SUPPLIER_DRIFT.get(vendor_id)
     drift_on = bool(drift and committed >= drift["from"])
     if drift_on:
@@ -194,7 +214,12 @@ def build_history(verbose: bool = True, db_path: Path | str | None = None) -> di
         if committed >= as_of:
             continue
 
-        qty = rng.choice([500, 1000, 1500, 2000, 3000, 5000, 8000])
+        # 數量依料別的常見下單量抽，跟 generate_data.py 用同一份表
+        # （domain.CATEGORY_SPEC）——先前各寫各的，光罩、光阻這種料
+        # 從沒出現過的 5000／8000 這種矽晶圓等級的數量，在 ERP 分頁
+        # 可以直接看到，一眼就穿幫；fallback 只在料別不在表裡時才用。
+        qty = rng.choice(CATEGORY_SPEC.get(m["category"], {}).get(
+            "qty", [500, 1000, 1500, 2000, 3000, 5000, 8000]))
         # 領域假設：瓶頸料的緩衝天數更薄（排程壓得緊，沒有多餘空間）
         buffer_days = (rng.randint(0, 12) if m["is_bottleneck"]
                        else rng.randint(3, 35))
@@ -221,8 +246,13 @@ def build_history(verbose: bool = True, db_path: Path | str | None = None) -> di
 
         pr_rows.append((pr_no, mid, qty, need.isoformat(), period_qty,
                         int((committed - as_of).days < 30 and rng.random() < 0.6)))
+        # 領域假設：下單日 = 承諾日往前推「標準前置期＋一點下單前置作業
+        #   （0-14 天）」，不是跟承諾日無關的固定 30-150 天——矽晶圓的
+        #   標準前置期常常就超過 90 天，固定區間會讓下單日看起來比
+        #   合約前置期還晚，story 對不起來。
+        lt = int(m["std_lead_time_days"])
         hdr.append((po_no, vid,
-                    (committed - timedelta(days=rng.randint(30, 150))).isoformat()))
+                    (committed - timedelta(days=lt + rng.randint(0, 14))).isoformat()))
         item.append((po_no, 10, mid, qty, pr_no))
         sched.append((po_no, 10, 1, committed.isoformat(), qty))
 
@@ -250,26 +280,40 @@ def build_history(verbose: bool = True, db_path: Path | str | None = None) -> di
         "收貨紀錄": con.execute("SELECT COUNT(*) FROM goods_receipt").fetchone()[0],
         "變更文件（含歷史）": con.execute("SELECT COUNT(*) FROM po_change_log").fetchone()[0],
     }
-    late = con.execute("""
-        SELECT SUM(CASE WHEN g.receipt_date > s.committed_date THEN 1 ELSE 0 END),
-               SUM(CASE WHEN g.receipt_date > r.need_date     THEN 1 ELSE 0 END),
-               COUNT(*)
+    # M-9：料到廠不代表能投產，「真正造成缺料」的定義要跟 backtest.py 的
+    # actual_short 一致——加上該料別的收貨處理天數才算，不是收貨當天。
+    # 這裡改成在 Python 端逐列算（不是純 SQL），因為 gr 天數依料別而不同。
+    gr_cfg = cfg.get("receiving", {}).get("gr_processing_days", {})
+    late_rows = con.execute("""
+        SELECT g.receipt_date, s.committed_date, r.need_date, m.category
         FROM goods_receipt g
-        JOIN po_item i     ON i.po_no = g.po_no AND i.item_no = g.item_no
-        JOIN po_schedule s ON s.po_no = g.po_no AND s.item_no = g.item_no
-        JOIN purchase_req r ON r.pr_no = i.pr_no
-    """).fetchone()
+        JOIN po_item i          ON i.po_no = g.po_no AND i.item_no = g.item_no
+        JOIN po_schedule s      ON s.po_no = g.po_no AND s.item_no = g.item_no
+        JOIN purchase_req r     ON r.pr_no = i.pr_no
+        JOIN material_master m  ON m.material_id = i.material_id
+    """).fetchall()
     con.close()
+
+    n = len(late_rows)
+    late_commit = sum(1 for row in late_rows if row["receipt_date"] > row["committed_date"])
+    late_need = sum(1 for row in late_rows if row["receipt_date"] > row["need_date"])
+    late_need_gr = sum(
+        1 for row in late_rows
+        if (date.fromisoformat(row["receipt_date"])
+            + timedelta(days=int(gr_cfg.get(row["category"], 0)))).isoformat() > row["need_date"])
 
     if verbose:
         print(f"[OK] 歷史單據已寫入 {path.name}")
         for k, val in stats.items():
             print(f"       {k:<20} {val:>6}")
-        if late and late[2]:
-            print(f"       其中晚於承諾日          {late[0]:>6}  "
-                  f"({late[0] / late[2] * 100:.1f}%)")
-            print(f"       其中晚於下游需求日      {late[1]:>6}  "
-                  f"({late[1] / late[2] * 100:.1f}%)  <- 真正造成缺料的")
+        if n:
+            print(f"       其中晚於承諾日          {late_commit:>6}  "
+                  f"({late_commit / n * 100:.1f}%)")
+            print(f"       其中晚於下游需求日      {late_need:>6}  "
+                  f"({late_need / n * 100:.1f}%)  <- 造成缺料的")
+            print(f"       其中晚於下游需求日      {late_need_gr:>6}  "
+                  f"({late_need_gr / n * 100:.1f}%)  <- 加上收貨處理天數後，"
+                  "真正造成缺料的")
         print()
         print("       提醒：這些結果由因果模型產生，非真實資料。")
         print("       回測只能證明方法可行，不能證明真實供應商的行為。")

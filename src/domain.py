@@ -62,6 +62,23 @@ SUPPLIER_TYPE_LABEL_ZH = {
     "SLURRY_MAKER": "研磨液廠",
 }
 
+# 領域假設：各料別的標準前置期、計量單位與常見下單量。
+#   前置期是「下單到到廠」的合約天數；12 吋矽晶圓與靶材最長，化學品最短。
+#   跟 CATEGORY_SUPPLIER_TYPE 放在同一個檔案的理由相同：合成資料產生器
+#   （generate_data.py／generate_history.py）都要用同一份數量選項，
+#   不能各寫一份——那正是歷史單「數量跟料別對不起來」這個 bug 的成因。
+CATEGORY_SPEC = {
+    "SILICON_WAFER": {"lt": (60, 120), "uom": "PCS", "qty": [500, 1000, 1500, 2000, 3000, 5000]},
+    "PHOTORESIST":   {"lt": (30, 90),  "uom": "GAL", "qty": [20, 40, 80, 120, 200]},
+    "SPECIALTY_GAS": {"lt": (20, 60),  "uom": "CYL", "qty": [10, 20, 40, 60, 100]},
+    "WET_CHEMICAL":  {"lt": (10, 30),  "uom": "DRM", "qty": [20, 40, 80, 160]},
+    "TARGET":        {"lt": (45, 100), "uom": "PCS", "qty": [2, 4, 8, 12, 20, 30]},
+    "MASK":          {"lt": (14, 35),  "uom": "PCS", "qty": [1]},
+    "CMP_SLURRY":    {"lt": (20, 50),  "uom": "GAL", "qty": [50, 100, 200, 400]},
+}
+CATEGORY_WEIGHTS = {"SILICON_WAFER": .25, "PHOTORESIST": .15, "SPECIALTY_GAS": .15,
+                    "WET_CHEMICAL": .15, "TARGET": .10, "MASK": .10, "CMP_SLURRY": .10}
+
 
 class CommitmentStrength(str, Enum):
     """
