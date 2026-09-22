@@ -174,6 +174,46 @@ def materials_df():
     return pipeline.get_data_source(pipeline.load_config()).materials()
 
 
+@st.cache_data(show_spinner=False)
+def outcomes_df():
+    """
+    歷史收貨結果（含供應商名稱），供「供應商月度績效」使用。
+
+    supplier_stats.load_outcomes() 本身沒有供應商名稱（只有 supplier_id）；
+    月度績效表要給企劃看，不能只顯示代號，所以在這裡併入一次，不必讓
+    exports.supplier_monthly() 也認得資料來源怎麼取名稱——它只管統計。
+
+    快取的理由跟 supplier_performance／reschedule_reliability 一樣：
+    這支要掃整個 goods_receipt 相關的 JOIN，不該每次切換月份選單就重算一次。
+    找不到歷史資料（FileNotFoundError／RuntimeError）不在這裡擋，讓呼叫端
+    決定要顯示什麼提示——跟頁面上其他歷史資料的錯誤處理一致。
+    """
+    import supplier_stats
+    outcomes = supplier_stats.load_outcomes().copy()
+    sups = pipeline.get_data_source(pipeline.load_config()).suppliers()
+    names = sups.set_index("supplier_id")["supplier_name"]
+    outcomes["supplier_name"] = outcomes["supplier_id"].map(names)
+    return outcomes
+
+
+def submit_confirmation(po_no: str, email_id: str, confirmed_date: str, note: str,
+                        user: str, *, db=None, now: str | None = None) -> tuple[bool, str]:
+    """
+    包一層給表單 callback／測試共用。
+
+    行動清單頁的確認表單與測試都呼叫這支，而不是各自直接呼叫
+    planner_settings.confirm_eta：表單要把 ValueError 轉成 (False, 訊息)
+    給 st.error 顯示，測試則想繞過巢狀 st.expander／st.form 裡的元件、
+    直接驗證「送出確認」這個動作本身的效果（見
+    tests/test_app_pages.py 的說明）。
+    """
+    try:
+        planner_settings.confirm_eta(db, po_no, email_id, confirmed_date, note, user, now=now)
+    except ValueError as e:
+        return False, str(e)
+    return True, ""
+
+
 def fmt_gap(gap) -> str:
     """預估缺料天數的人話：缺 N 天／沒有緩衝／尚有 N 天緩衝。"""
     if gap is None or gap != gap:

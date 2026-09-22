@@ -53,7 +53,7 @@ pg = st.navigation({
     "企劃工作區": [
         st.Page("views/actions.py", title="今日行動清單", icon="📋", default=True),
         st.Page("views/search.py", title="物料智能檢索", icon="🔎"),
-        st.Page("views/suppliers.py", title="供應商歷史", icon="⚖️"),
+        st.Page("views/suppliers.py", title="供應商績效", icon="🏭"),
         st.Page("views/receiving.py", title="收貨處理天數", icon="🛠"),
         st.Page("views/erp.py", title="ERP 單據", icon="📄"),
         st.Page("views/emails.py", title="信件與解析軌跡", icon="📨"),
