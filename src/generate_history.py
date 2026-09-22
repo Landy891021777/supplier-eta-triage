@@ -63,12 +63,13 @@ def _is_quarter_end(d: date) -> bool:
 # 世界的驅動力 = 供應商體質、料件類別、瓶頸、累犯、季末、批量、隨時間漂移。
 # 工具只用「供應商 × 是否改期過」估計落差，刻意沒有照抄這些因子 ——
 # 估計方法沒看到的因子，正是回測要檢驗它會不會因此失準的地方。
+#
+# 領域假設：光阻與特殊氣體的供應集中在少數幾家、交期波動最大；
+#   化學品供應商多、替代性高，波動最小；光罩多為客製、前置期短，
+#   一旦異常較難用「提早下單」吸收，但波動本身不算大。
 CATEGORY_RISK = {
-    # 領域假設：載板在缺料循環中的交期波動遠大於晶圓段。
-    "SUBSTRATE": 0.14,
-    "WAFER": 0.05,
-    "ASSEMBLY": 0.06,
-    "MASK": 0.02,
+    "PHOTORESIST": 0.10, "SPECIALTY_GAS": 0.08, "TARGET": 0.06,
+    "SILICON_WAFER": 0.05, "CMP_SLURRY": 0.04, "WET_CHEMICAL": 0.03, "MASK": 0.02,
 }
 
 # 領域假設：供應商的交付表現不是固定不變的。
@@ -76,8 +77,8 @@ CATEGORY_RISK = {
 # from：從這天起（以承諾日計）表現改變；p_late：延遲機率的加減量；
 # delay_mult：延遲時的天數倍率。
 SUPPLIER_DRIFT = {
-    "SUP-S02": {"from": date(2026, 3, 1), "p_late": +0.25, "delay_mult": 1.4},  # 變差
-    "SUP-F03": {"from": date(2026, 4, 1), "p_late": -0.22, "delay_mult": 0.8},  # 改善
+    "SUP-W03": {"from": date(2026, 3, 1), "p_late": +0.25, "delay_mult": 1.4},  # 變差
+    "SUP-G01": {"from": date(2026, 4, 1), "p_late": -0.22, "delay_mult": 0.8},  # 改善
 }
 
 
@@ -115,8 +116,9 @@ def _simulate_outcome(rng: random.Random, *, vendor_id: str, otd_rate: float,
     if is_bottleneck:
         base *= 1.35
     base *= (1.0 + 0.12 * reschedule_count)
-    if category == "SUBSTRATE":
-        base *= 1.4
+    # 領域假設：光阻供應商少、批次生產週期長，一旦延遲，補回來的時間也更長。
+    if category == "PHOTORESIST":
+        base *= 1.3
     if drift_on:
         base *= drift["delay_mult"]
     return max(1, int(round(base)))
