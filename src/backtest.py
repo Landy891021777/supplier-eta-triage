@@ -234,6 +234,34 @@ def run(as_of: date | None = None) -> dict:
             "n_history": len(outcomes)}
 
 
+COVERAGE_TOLERANCE = 0.03  # 實際與預期相差 3 個百分點以內，視為沒有偏離
+
+
+def coverage_verdict(bt: pd.DataFrame) -> str:
+    """
+    依實際數字寫出涵蓋率的結論，不寫死。
+
+    踩坑紀錄：這句話原本寫死成「涵蓋率沒有偏離預期」。換成晶圓廠資料後，
+    P95 只涵蓋 90%，那句話就變成不實陳述，而報告照樣產出、不會報錯。
+    """
+    off = []
+    for p in PERCENTILES:
+        rate, n = coverage(bt, p)
+        if rate is not None and abs(rate - p) > COVERAGE_TOLERANCE:
+            off.append((p, rate))
+    if not off:
+        return ("各百分位的實際涵蓋率都在預期 ±3 個百分點內：用過去落差估計的方法，"
+                "在**有供應商表現隨時間變化**的合成資料上仍然站得住腳；那些變化是我們"
+                "自己寫進產生器的，見 `SUPPLIER_DRIFT`。")
+    parts = "、".join(f"P{int(round(p * 100))} 實際 {r:.1%}（預期 {p:.0%}）" for p, r in off)
+    low = any(r < p for p, r in off)
+    why = ("低於預期代表估計偏樂觀。可能的原因之一是供應商表現隨時間變差"
+           "（`SUPPLIER_DRIFT`），而估計用的是變差前後混在一起的整段歷史；"
+           "這是「只看歷史統計、不做預測」這個設計的已知代價。"
+           if low else "高於預期代表估計偏保守，保守到料日會比實際晚。")
+    return f"涵蓋率有偏離：{parts}。{why}"
+
+
 def write_report(res: dict, path: Path = OUT) -> str:
     bt = res["bt"]
     test_from = res["test_from"]
@@ -259,6 +287,7 @@ def write_report(res: dict, path: Path = OUT) -> str:
         cov_rows.append((f"P{int(round(p * 100))}", f"{p:.0%}",
                          "—" if rate is None else f"{rate:.1%}", n))
     cov = pd.DataFrame(cov_rows, columns=["百分位", "預期涵蓋率", "實際涵蓋率", "有估計的單數"])
+    cov_note = coverage_verdict(bt)
     rank, k = ranking_table(bt)
     rank["前段命中率"] = rank["前段命中率"].map(lambda v: f"{v:.1%}")
     rank["AUC"] = rank["AUC"].map(lambda v: "—" if pd.isna(v) else f"{v:.3f}")
@@ -304,8 +333,7 @@ AUC 是整體排序品質（隨機一張缺料單分數高於一張沒缺料單�
 
 ## 怎麼讀這份結果
 
-- 涵蓋率在測試期沒有偏離預期，只說明「用過去落差估計」這個方法在**有供應商表現隨時間變化**
-  的合成資料上仍然站得住腳；那些變化是我們自己寫進產生器的，見 `SUPPLIER_DRIFT`。
+- {cov_note}
 - 前段命中率是把測試期的單放在一起排序，不是逐日模擬企劃每天面對的清單。
 - 兩個基準都是實務上真的會用的簡單做法，不是刻意做弱的稻草人。
 - 本工具與基準 A 的差別只在「有沒有加上這家供應商過去的落差」；

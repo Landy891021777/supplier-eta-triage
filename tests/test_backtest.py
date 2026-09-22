@@ -207,3 +207,16 @@ def test_write_report_handles_empty_backtest(tmp_path):
     text = backtest.write_report(res, path=out_path)
     assert "沒有改期過的單" in text
     assert out_path.exists()
+
+
+def test_coverage_verdict_follows_the_numbers():
+    """
+    回歸：報告原本寫死「涵蓋率沒有偏離預期」。換成晶圓廠資料後 P95 只涵蓋 90%，
+    那句話變成不實陳述、報告照樣產出。結論必須依實際數字寫。
+    """
+    good = pd.DataFrame({"delay_days": list(range(100)),
+                         "est_80": [79] * 100, "est_90": [89] * 100, "est_95": [94] * 100})
+    assert "都在預期" in backtest.coverage_verdict(good)
+    bad = good.assign(est_95=[89] * 100)
+    verdict = backtest.coverage_verdict(bad)
+    assert "有偏離" in verdict and "P95" in verdict and "偏樂觀" in verdict
