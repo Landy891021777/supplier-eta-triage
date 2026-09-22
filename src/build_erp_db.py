@@ -37,6 +37,12 @@ from pathlib import Path
 
 import pandas as pd
 
+try:  # 允許以 `python src/build_erp_db.py` 或 `python -m src.build_erp_db` 執行
+    from .domain import CATEGORY_SUPPLIER_TYPE
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from domain import CATEGORY_SUPPLIER_TYPE
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DB_PATH = DATA / "erp_sim.db"
@@ -68,7 +74,9 @@ CREATE TABLE material_master (
     category           TEXT,
     std_lead_time_days INTEGER,
     is_bottleneck      INTEGER DEFAULT 0,
-    criticality        TEXT
+    criticality        TEXT,
+    base_uom           TEXT,     -- ≈ MARA-MEINS 基本計量單位
+    gr_processing_days INTEGER  -- ≈ MARC-WEBAZ 收貨處理時間：到廠後幾天才能投產
 );
 
 -- 替代料關係 (≈ BOM 替代群組 / 主檔替代關係)
@@ -179,9 +187,10 @@ def build(verbose: bool = True) -> Path:
               "historical_otd_rate"]].itertuples(index=False, name=None))
 
     con.executemany(
-        "INSERT INTO material_master VALUES (?,?,?,?,?)",
+        "INSERT INTO material_master VALUES (?,?,?,?,?,?,?)",
         [(r.material_id, r.category, int(r.std_lead_time_days),
-          int(bool(r.is_bottleneck)), r.criticality)
+          int(bool(r.is_bottleneck)), r.criticality,
+          r.base_uom, int(r.gr_processing_days))
          for r in mats.itertuples(index=False)])
 
     # 替代料：CSV 裡的空字串在此被正確地「不寫入」，
@@ -197,14 +206,14 @@ def build(verbose: bool = True) -> Path:
     sup_by_type: dict[str, list[str]] = {}
     for r in sups.itertuples(index=False):
         sup_by_type.setdefault(r.supplier_type, []).append(r.supplier_id)
-    type_of_cat = {"WAFER": "FOUNDRY", "MASK": "MASK_SHOP",
-                   "SUBSTRATE": "SUBSTRATE", "ASSEMBLY": "OSAT"}
 
     primary_vendor = (pos.drop_duplicates("material_id")
                       .set_index("material_id")["supplier_id"].to_dict())
     src_rows = []
     for r in mats.itertuples(index=False):
-        cands = sup_by_type.get(type_of_cat.get(r.category, ""), [])
+        # 料別 → 供應商類型的對照只維護在 domain.py 一個地方（見決策 17），
+        # 避免這裡跟 generate_data.py 各寫一份、新增料別時漏改其中一邊。
+        cands = sup_by_type.get(CATEGORY_SUPPLIER_TYPE.get(r.category, ""), [])
         if not cands:
             continue
         first = primary_vendor.get(r.material_id, cands[0])

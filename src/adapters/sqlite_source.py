@@ -106,10 +106,21 @@ SELECT
         SELECT ma.alt_material_id FROM material_alternate ma
         WHERE ma.material_id = m.material_id LIMIT 1
     ), '')                                          AS alt_material_id,
-    m.criticality
+    m.criticality,
+    m.base_uom,
+    m.gr_processing_days
 FROM material_master m
 ORDER BY m.material_id
 """
+
+# 舊版資料庫相容：Task 4（收貨處理天數）之前建立的模擬 ERP，
+# material_master 沒有 base_uom／gr_processing_days 這兩欄。
+# 真要重建要到 Task 10 才會用新版 build_erp_db.py，在那之前
+# 用 NULL／0 補齊，讓舊資料庫仍讀得動（0 天代表「主檔沒維護，視為當天可用」）。
+MATERIAL_SQL_LEGACY = MATERIAL_SQL.replace(
+    "    m.base_uom,\n    m.gr_processing_days\n",
+    "    NULL AS base_uom,\n    0 AS gr_processing_days\n",
+)
 
 SUPPLIER_SQL = """
 SELECT vendor_id   AS supplier_id,
@@ -140,16 +151,26 @@ class SqliteSource(DataSource):
                 self._cache[key] = pd.read_sql_query(sql, con)
         return self._cache[key].copy()
 
+    def _material_sql(self) -> str:
+        """舊版資料庫沒有 base_uom／gr_processing_days 欄位時，改用相容版 SQL。"""
+        with sqlite3.connect(self.db_path) as con:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(material_master)")}
+        if {"base_uom", "gr_processing_days"} <= cols:
+            return MATERIAL_SQL
+        return MATERIAL_SQL_LEGACY
+
     def purchase_orders(self) -> pd.DataFrame:
         df = self._q("po", PO_SQL)
         df["downstream_scheduled"] = df["downstream_scheduled"].astype(bool)
         return df
 
     def materials(self) -> pd.DataFrame:
-        df = self._q("mat", MATERIAL_SQL)
+        df = self._q("mat", self._material_sql())
         df["is_bottleneck"] = df["is_bottleneck"].astype(bool)
         df["has_qualified_second_source"] = (
             df["has_qualified_second_source"].astype(bool))
+        # 缺值代表主檔沒維護，視為當天可用（0 天），而不是讓下游算式碰到 NaN。
+        df["gr_processing_days"] = df["gr_processing_days"].fillna(0).astype(int)
         return df
 
     def suppliers(self) -> pd.DataFrame:

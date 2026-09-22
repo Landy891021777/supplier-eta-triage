@@ -41,7 +41,16 @@ class CsvSource(DataSource):
         return self._read("po_master.csv")
 
     def materials(self) -> pd.DataFrame:
-        return self._read("materials.csv")
+        df = self._read("materials.csv")
+        # 舊版資料相容：Task 4（收貨處理天數）之前產生的 materials.csv
+        # 沒有 base_uom／gr_processing_days 這兩欄。用 NULL／0 補齊，
+        # 讓舊資料仍滿足資料合約；真實 data/ 要到 Task 10 才會用新版
+        # generate_data.py 重新產生。
+        if "base_uom" not in df.columns:
+            df["base_uom"] = None
+        if "gr_processing_days" not in df.columns:
+            df["gr_processing_days"] = 0
+        return df
 
     def suppliers(self) -> pd.DataFrame:
         return self._read("suppliers.csv")

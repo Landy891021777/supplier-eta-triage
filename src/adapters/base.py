@@ -54,6 +54,8 @@ MATERIAL_CONTRACT = {
     "has_qualified_second_source": "是否有已認證二源（推導：來源清單中合格供應商是否 ≥ 2 家）",
     "alt_material_id": "替代料號（推導：替代料關係表）",
     "criticality": "關鍵性等級",
+    "base_uom": "基本計量單位",
+    "gr_processing_days": "收貨處理天數（到廠後幾天才能投產；舊版資料庫沒有此欄位時補 0）",
 }
 
 SUPPLIER_CONTRACT = {

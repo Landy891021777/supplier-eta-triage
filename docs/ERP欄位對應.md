@@ -33,6 +33,8 @@
 |---|---|---|
 | `vendor_master` | LFA1 | 供應商主檔 |
 | `material_master` | MARA / MARC | 料號主檔、標準前置期 |
+| `material_master.base_uom` | MARA-MEINS | 基本計量單位 |
+| `material_master.gr_processing_days` | MARC-WEBAZ | 收貨處理時間：到廠後幾天才能投產（MRP 算可用日時會加上這天數） |
 | `material_alternate` | BOM 替代群組 / 主檔替代關係 | 替代料 |
 | `source_list` | EORD | **來源清單 —— 二源判定的權威來源** |
 | `purchase_req` | EBAN | **請購單 —— 需求日的來源** |
