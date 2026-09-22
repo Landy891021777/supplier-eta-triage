@@ -32,6 +32,8 @@ import os  # noqa: E402
 import benefit  # noqa: E402
 import draft as draft_mod  # noqa: E402
 import pipeline  # noqa: E402
+import planner_settings  # noqa: E402
+from domain import CATEGORY_LABEL_ZH  # noqa: E402
 from llm.provider import get_provider  # noqa: E402
 
 st.set_page_config(page_title="Supply Chain AI Tool: Delivery Risk Prioritization",
@@ -98,7 +100,16 @@ def main() -> None:
         st.error(f"{e}")
         st.stop()
 
-    actions = result["actions"].copy()
+    # ---------------- 套用企劃在「收貨處理天數」分頁存的覆寫 ----------------
+    # run() 只算出「沒有覆寫」的分級（等同傳空字典給 retriage()）。這裡拿
+    # result["all"]（所有已對位的原始欄位）重跑 retriage()：只重算分級，
+    # 不重跑讀信，企劃調完天數、畫面 rerun 後就能立刻看到新的優先序。
+    overrides = planner_settings.load_overrides()
+    gr_map = {mid: planner_settings.effective_gr_days(mid, None, None, overrides)
+             for mid in overrides}
+    # result 沒有 "all"（沒有任何信件被解析出結果時 run() 提早回傳）就沒有
+    # 東西可以重算，退回原本（同樣是空的）actions。
+    actions = pipeline.retriage(result.get("all", result["actions"]), gr_map, cfg["triage"])
 
     stats = dict(result["stats"])
     stats.update(
@@ -124,10 +135,10 @@ def main() -> None:
 
     # 分頁順序依使用情境排列：生管每天用的在前，驗證與稽核用的在後。
     # 以具名變數取代 tabs[0]～tabs[6] 索引：插入或調整分頁時不會整批錯位。
-    (t_actions, t_search, t_erp, t_history,
+    (t_actions, t_search, t_erp, t_history, t_planner,
      t_experiment, t_benefit, t_trace, t_emails) = st.tabs([
         "📋 今日行動清單", "🔎 物料智能檢索", "📄 ERP 單據", "⚖️ 供應商歷史",
-        "🧪 評估實驗", "📊 效益量化", "🔍 解析軌跡", "📨 原始信件"])
+        "🛠 收貨處理天數", "🧪 評估實驗", "📊 效益量化", "🔍 解析軌跡", "📨 原始信件"])
 
     # ==================== 分頁 1：行動清單 ====================
     with t_actions:
@@ -151,12 +162,12 @@ def main() -> None:
             st.info("目前條件下沒有待處理案件。")
         else:
             st.dataframe(
-                view[["priority", "gap_days", "conservative_eta", "po_no", "material_id",
-                      "supplier_name", "committed_date", "new_eta",
+                view[["priority", "gap_days", "conservative_eta", "available_date", "po_no",
+                      "material_id", "supplier_name", "committed_date", "new_eta",
                       "commitment_strength", "needs_human_review"]]
                 .rename(columns={
                     "priority": "優先級", "gap_days": "預估缺料天數", "conservative_eta": "保守到料日",
-                    "po_no": "採購單號",
+                    "available_date": "可投產日", "po_no": "採購單號",
                     "material_id": "料號", "supplier_name": "供應商",
                     "committed_date": "原承諾日", "new_eta": "新交期",
                     "commitment_strength": "承諾強度", "needs_human_review": "需人工確認"}),
@@ -389,6 +400,86 @@ def main() -> None:
         except (FileNotFoundError, RuntimeError) as e:
             st.info(f"{e}\n\n請先執行： `py src/generate_history.py`")
 
+    # ==================== 分頁 8：收貨處理天數 ====================
+    with t_planner:
+        st.subheader("🛠 收貨處理天數")
+        st.caption(
+            "料到廠後要幾天才能投產（進料檢驗、入庫、光阻回溫等）。預設值依料別，"
+            "你可以依實際情況逐料號調整；調整會立刻反映在行動清單。"
+            "**這是工具內的設定，不會寫回 ERP 料號主檔**；雲端展示環境重新啟動後會回到預設。")
+
+        mats_df = _materials_df()
+        table_rows = []
+        for m in mats_df.itertuples(index=False):
+            days, source = planner_settings.effective_gr_days(
+                m.material_id, m.gr_processing_days, m.category, overrides)
+            default_days = m.gr_processing_days
+            table_rows.append({
+                "料號": m.material_id,
+                "料別": CATEGORY_LABEL_ZH.get(m.category, m.category),
+                "主檔預設天數": int(default_days) if default_days == default_days else None,
+                "目前使用天數": days,
+                "來源": source,
+            })
+        st.dataframe(pd.DataFrame(table_rows), width="stretch", hide_index=True, height=320)
+
+        st.divider()
+        st.markdown("#### 調整料號的收貨處理天數")
+        material_ids = mats_df["material_id"].tolist()
+        with st.form("gr_override_form", clear_on_submit=True):
+            fc1, fc2 = st.columns([2, 1])
+            sel_material = fc1.selectbox("料號", material_ids)
+            sel_days = fc2.number_input("天數", min_value=0,
+                                        max_value=planner_settings.MAX_DAYS, step=1, value=0)
+            sel_reason = st.text_input("調整原因（必填）")
+            sel_user = st.text_input("姓名（必填）")
+            if st.form_submit_button("送出調整"):
+                default_days = mats_df.loc[
+                    mats_df["material_id"] == sel_material, "gr_processing_days"].iloc[0]
+                try:
+                    planner_settings.set_override(
+                        None, sel_material, sel_days, sel_reason, sel_user,
+                        default_days=int(default_days) if default_days == default_days else None)
+                except ValueError as e:
+                    st.error(str(e))
+                else:
+                    st.success(f"已更新 {sel_material} 的收貨處理天數為 {int(sel_days)} 天。")
+                    st.rerun()
+
+        if overrides:
+            st.markdown("#### 恢復預設")
+            with st.form("gr_clear_form", clear_on_submit=True):
+                cc1, cc2 = st.columns([2, 1])
+                clr_material = cc1.selectbox("料號（已調整）", sorted(overrides))
+                clr_reason = cc2.text_input("恢復原因（必填）")
+                clr_user = st.text_input("姓名（必填）", key="clear_user")
+                if st.form_submit_button("恢復預設值"):
+                    default_days = mats_df.loc[
+                        mats_df["material_id"] == clr_material, "gr_processing_days"].iloc[0]
+                    try:
+                        planner_settings.clear_override(
+                            None, clr_material, clr_reason, clr_user,
+                            default_days=int(default_days) if default_days == default_days else 0)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(f"{clr_material} 已恢復為料別預設天數。")
+                        st.rerun()
+
+        st.markdown("#### 調整紀錄")
+        log = planner_settings.change_log()
+        if not log:
+            st.info("尚無調整紀錄。")
+        else:
+            log_df = pd.DataFrame(log).sort_values("log_id", ascending=False)
+            st.dataframe(
+                log_df[["changed_at", "material_id", "old_days", "new_days",
+                        "reason", "changed_by"]]
+                .rename(columns={"changed_at": "時間", "material_id": "料號",
+                                 "old_days": "原天數", "new_days": "新天數",
+                                 "reason": "原因", "changed_by": "調整人"}),
+                width="stretch", hide_index=True, height=240)
+
     # ==================== 物料智能檢索（RAG） ====================
     with t_search:
         _render_search_tab(str(result["as_of"]))
@@ -444,7 +535,7 @@ def _render_search_tab(reference_date: str) -> None:
             st.session_state["rag_question"] = example
 
     question = st.text_input("輸入問題", key="rag_question",
-                             placeholder="例：SUB-FCCSP-1088 有沒有第二家可以買？")
+                             placeholder="例：PR-ArF-1088 有沒有第二家可以買？")
     if not question:
         return
 
@@ -490,6 +581,11 @@ def _supplier_performance():
 def _reschedule_reliability():
     import supplier_stats
     return supplier_stats.reschedule_reliability()
+
+
+@st.cache_data(show_spinner=False)
+def _materials_df():
+    return pipeline.get_data_source(pipeline.load_config()).materials()
 
 
 def _fmt_gap(gap) -> str:

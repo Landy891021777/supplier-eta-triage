@@ -41,9 +41,10 @@ SEED_DIR = ROOT / "demo_cache" / "rag"
 ID_PATTERNS = [
     re.compile(r"\bPO-\d{4}-\d{4,6}\b", re.IGNORECASE),
     re.compile(r"\bSUP-[A-Z]\d{2}\b", re.IGNORECASE),
-    re.compile(r"\b(?:WF|MSK)-N\d{1,2}-[A-Z]{2}\d{4}\b", re.IGNORECASE),
-    re.compile(r"\bSUB-FCCSP-\d{4}\b", re.IGNORECASE),
-    re.compile(r"\bASM-[A-Z]{2}\d{4}-\d{2}\b", re.IGNORECASE),
+    re.compile(r"\bSW-300-[PE]-\d{4}\b", re.IGNORECASE),
+    re.compile(r"\bPR-(?:ArF|KrF|EUV|iLine)-\d{4}\b", re.IGNORECASE),
+    re.compile(r"\b(?:GS|CH|TG|SL)-[A-Za-z0-9]{1,6}-\d{2}\b", re.IGNORECASE),
+    re.compile(r"\bMSK-N\d{1,2}-[A-Z]{2}\d{4}\b", re.IGNORECASE),
 ]
 RRF_K = 60
 
@@ -73,6 +74,11 @@ class HybridRetriever:
         self.cards = cards
         self.provider = provider
         self._by_id = {c.card_id: c for c in cards}
+        # extract_ids() 會把抓到的識別碼轉大寫（"PR-ARF-1088"），但卡片 ID
+        # 保留料號原本的大小寫（"MAT:PR-ArF-1088"，光阻的 ArF／KrF／EUV／iLine
+        # 段別本來就混合大小寫）。不做大小寫不敏感比對，混合大小寫的料號
+        # 問句就永遠釘選不到，等同精確 ID 釘選整組失效。
+        self._by_id_lower = {cid.lower(): card for cid, card in self._by_id.items()}
 
         # 字元 n-gram：中文不需要斷詞器，單號這種混合字串也能部分比對
         self._tfidf = TfidfVectorizer(analyzer="char", ngram_range=(2, 3),
@@ -183,16 +189,18 @@ class HybridRetriever:
         related: list[str] = []
         for ident in ids:
             for prefix in ("PO", "MAT", "SUP"):
-                cid = f"{prefix}:{ident}"
-                if cid in self._by_id and cid not in direct:
-                    direct.append(cid)
+                card = self._by_id_lower.get(f"{prefix}:{ident}".lower())
+                if card and card.card_id not in direct:
+                    direct.append(card.card_id)
             # 關聯一層：採購單 → 它的料號卡與供應商卡
-            po_card = self._by_id.get(f"PO:{ident}")
+            po_card = self._by_id_lower.get(f"PO:{ident}".lower())
             if po_card:
                 for rel in (f"MAT:{po_card.meta.get('material_id')}",
                             f"SUP:{po_card.meta.get('supplier_id')}"):
-                    if rel in self._by_id and rel not in related:
-                        related.append(rel)
+                    rel_card = self._by_id_lower.get(rel.lower())
+                    if rel_card and rel_card.card_id not in direct \
+                            and rel_card.card_id not in related:
+                        related.append(rel_card.card_id)
         # 直接點名的實體排前面，關聯帶出來的排後面
         ordered = direct + [c for c in related if c not in direct]
         return [self._by_id[c] for c in ordered]

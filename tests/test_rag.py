@@ -19,17 +19,69 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from rag.answer import answer, check_citations, choose_mode  # noqa: E402
-from rag.knowledge import Card, build_cards, doc_cards  # noqa: E402
+from rag.knowledge import (Card, doc_cards, material_cards, po_cards,  # noqa: E402
+                           summary_cards, supplier_cards)
 from rag.retriever import Hit, HybridRetriever, extract_ids  # noqa: E402
-
-DB = ROOT / "data" / "erp_sim.db"
-needs_data = pytest.mark.skipif(
-    not DB.exists(), reason="需先執行 generate_data / build_erp_db / generate_history")
 
 
 @pytest.fixture(scope="module")
-def cards():
-    return build_cards()
+def new_world_db(tmp_path_factory):
+    """
+    在 tmp_path 重建一份新世界（晶圓廠）的模擬 ERP 資料庫，含歷史收貨紀錄。
+
+    不能直接用 build_cards() 讀真實 data/erp_sim.db：那份資料庫要到 Task 10
+    才會用新版 generate_data.py 重建，在那之前仍是舊世界（Fabless：
+    WF-／SUB-FCCSP-／ASM- 這些料號、SUP-F03 這些供應商代號），
+    本檔要測的新世界識別碼（PR-ArF-1088、SW-300-E-3390、SUP-W03…）
+    在那份資料庫裡根本不存在，卡片會建不出來、精確 ID 釘選測試會全滅。
+
+    作法跟 test_generate_history.py 的 rebuilt fixture 相同：monkeypatch
+    產生器的模組級路徑常數，讓 generate_data／build_erp_db 寫進 tmp_path
+    而不是真實 data/。
+    """
+    import build_erp_db
+    import generate_data
+    import generate_history
+
+    tmp = tmp_path_factory.mktemp("rag_erp")
+    saved = (generate_data.DATA, generate_data.INBOX,
+              build_erp_db.DATA, build_erp_db.DB_PATH)
+    try:
+        generate_data.DATA = tmp
+        generate_data.INBOX = tmp / "inbox"
+        build_erp_db.DATA = tmp
+        build_erp_db.DB_PATH = tmp / "erp_sim.db"
+        generate_data.main()
+        build_erp_db.build(verbose=False)
+    finally:
+        (generate_data.DATA, generate_data.INBOX,
+         build_erp_db.DATA, build_erp_db.DB_PATH) = saved
+
+    db_path = tmp / "erp_sim.db"
+    generate_history.build_history(verbose=False, db_path=db_path)
+    return db_path
+
+
+@pytest.fixture(scope="module")
+def cards(new_world_db):
+    """比照 rag.knowledge.build_cards()，只是資料來源換成 tmp_path 的新世界資料庫。"""
+    from datetime import date
+
+    import pipeline
+    import supplier_stats
+    from adapters.sqlite_source import SqliteSource
+
+    src = SqliteSource(db_path=new_world_db)
+    pos, mats, sups = src.purchase_orders(), src.materials(), src.suppliers()
+    as_of = date.fromisoformat(pipeline.load_config()["data_generation"]["as_of_date"])
+    perf = supplier_stats.supplier_performance(
+        supplier_stats.load_outcomes(db_path=new_world_db))
+
+    return (summary_cards(sups, perf, mats, pos)
+            + supplier_cards(sups, perf, pos)
+            + material_cards(mats, pos)
+            + po_cards(pos, mats, sups, as_of)
+            + doc_cards())
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +92,6 @@ def retriever(cards):
 # ---------------------------------------------------------------------------
 # 切塊
 # ---------------------------------------------------------------------------
-@needs_data
 def test_one_card_per_entity(cards):
     """一個實體一張卡：同一張採購單不可以被切成兩張。"""
     ids = [c.card_id for c in cards]
@@ -49,7 +100,6 @@ def test_one_card_per_entity(cards):
     assert {"po", "material", "supplier", "summary", "doc"} <= kinds
 
 
-@needs_data
 def test_po_card_is_self_contained(cards):
     """採購單卡必須同時帶有單號、承諾日與需求日，單獨被撈出來也能回答問題。"""
     card = next(c for c in cards if c.card_id == "PO:PO-2026-04205")
@@ -57,7 +107,6 @@ def test_po_card_is_self_contained(cards):
         assert token in card.text
 
 
-@needs_data
 def test_supplier_ranking_card_is_sorted_worst_first(cards):
     """
     回歸測試：pandas 的 itertuples 會把含括號的中文欄名改成 _3、_5 位置名，
@@ -87,11 +136,29 @@ def test_content_hash_changes_with_content():
 # ---------------------------------------------------------------------------
 def test_extract_ids_follow_question_order_across_types():
     """不同類型的識別碼混在一起時，順序依問題中出現的位置，而非依識別碼種類。"""
-    q = "PO-2026-04205 跟 SUB-FCCSP-1088、WF-N6-XR3390、SUP-F03 的狀況"
-    assert extract_ids(q) == ["PO-2026-04205", "SUB-FCCSP-1088", "WF-N6-XR3390", "SUP-F03"]
+    q = "PO-2026-04205 跟 PR-ArF-1088、SW-300-E-3390、SUP-W03 的狀況"
+    assert extract_ids(q) == ["PO-2026-04205", "PR-ARF-1088", "SW-300-E-3390", "SUP-W03"]
 
 
-@needs_data
+def test_extract_ids_is_case_insensitive_for_mixed_case_material_ids():
+    """
+    光阻料號的段別本來就混合大小寫（PR-ArF-1088），但 extract_ids() 為了讓不同
+    大小寫寫法都能命中而統一轉大寫。若卡片釘選比對沒有跟著做大小寫不敏感，
+    問句小寫或全大寫都會釘選不到卡片，等同精確 ID 釘選整組失效。
+    """
+    q = "PR-ARF-1088 這顆料有沒有第二家可以買"
+    assert extract_ids(q) == ["PR-ARF-1088"]
+
+
+def test_pinning_matches_mixed_case_material_card_id():
+    """卡片 ID 保留料號原本大小寫（MAT:PR-ArF-1088），問句大小寫不論怎麼寫都要釘選到同一張卡。"""
+    card = Card("MAT:PR-ArF-1088", "material", "料號 PR-ArF-1088", "料號：PR-ArF-1088")
+    retriever = HybridRetriever([card], provider=None)
+    for q in ("PR-ARF-1088 有沒有第二家可以買", "pr-arf-1088 有沒有第二家可以買"):
+        hits = retriever.search(q, k=3)
+        assert hits and hits[0].card.card_id == "MAT:PR-ArF-1088", q
+
+
 def test_pinning_brings_related_supplier_card(retriever):
     """
     問採購單的供應商時，答案不在採購單卡上。
@@ -99,16 +166,14 @@ def test_pinning_brings_related_supplier_card(retriever):
     """
     ids = [h.card.card_id for h in retriever.search("PO-2026-04278 的供應商靠得住嗎", k=5)]
     assert ids[0] == "PO:PO-2026-04278"
-    assert "SUP:SUP-F03" in ids[:3]
+    assert "SUP:SUP-T01" in ids[:3]
 
 
-@needs_data
 def test_pinning_preserves_question_order(retriever):
-    ids = [h.card.card_id for h in retriever.search("比較 SUP-S01 和 SUP-F02", k=4)]
-    assert ids[:2] == ["SUP:SUP-S01", "SUP:SUP-F02"]
+    ids = [h.card.card_id for h in retriever.search("比較 SUP-R02 和 SUP-W02", k=4)]
+    assert ids[:2] == ["SUP:SUP-R02", "SUP:SUP-W02"]
 
 
-@needs_data
 def test_pinning_can_be_disabled_for_evaluation(retriever):
     pinned = retriever.search("PO-2026-04278 的供應商", k=5, pin=True)
     unpinned = retriever.search("PO-2026-04278 的供應商", k=5, pin=False)
@@ -157,7 +222,6 @@ def test_citation_check_detects_missing_citations():
     assert check_citations("這張單很緊急。", given)["uncited"] is True
 
 
-@needs_data
 def test_no_provider_returns_raw_sources_not_fake_answer(retriever):
     """沒有金鑰時不可以假裝有 AI 回答，要直接列出原始資料並說明原因。"""
     res = answer("PO-2026-04205 現在狀況如何", retriever, provider=None)
