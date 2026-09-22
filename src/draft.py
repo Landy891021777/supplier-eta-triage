@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from llm.provider import BaseProvider, get_provider
 
-PROMPT = """你是半導體公司的生產管理專員，正要回信給供應商窗口，追一張交期有變的採購單。
+PROMPT = """你是半導體公司的物料企劃，正要回信給供應商窗口，追一張交期有變的採購單。
 
 案件資訊：
 - 採購單號：{po_no}
@@ -29,7 +29,7 @@ PROMPT = """你是半導體公司的生產管理專員，正要回信給供應�
 - 供應商新回覆交期：{new_eta}
 - 供應商承諾強度：{strength}
 - 下游需求日：{need_date}
-- 系統判定影響程度：{priority}（影響分數 {impact}）
+- 系統判定：{priority}（預估缺料天數 {gap}；正數代表預估來不及，負數代表尚有緩衝）
 - 主要原因：{reasons}
 
 請寫一封繁體中文的回信草稿，要求：
@@ -63,7 +63,7 @@ def _template_draft(row: dict) -> str:
         f"原承諾交期為 {row.get('committed_date')}，"
         f"目前{desc}為 {eta}。\n"
         f"我方此料之下游需求日為 {row.get('need_date')}，"
-        f"本案經系統評估影響程度為 {row.get('priority')}。{ask}\n\n"
+        f"本案經系統評估為 {row.get('priority')}。{ask}\n\n"
         f"若有部分數量可提前交付，也煩請一併告知，我方可據此調整投料順序。\n\n"
         f"感謝協助。\n\n"
         f"（本草稿由供應商交期回覆解析工具產生，寄出前請自行確認內容與語氣）"
@@ -76,13 +76,13 @@ def generate(row: dict, provider: BaseProvider | None = None) -> tuple[str, str]
     if not provider.available:
         return _template_draft(row), "規則式模板（未接 LLM）"
 
-    reasons = row.get("top_reasons") or []
+    reasons = row.get("reasons") or []
     prompt = PROMPT.format(
         po_no=row.get("po_no"), material_id=row.get("material_id"),
         supplier_name=row.get("supplier_name"), committed_date=row.get("committed_date"),
         new_eta=row.get("new_eta") or "（信中未提供明確日期）",
         strength=row.get("commitment_strength"), need_date=row.get("need_date"),
-        priority=row.get("priority"), impact=row.get("impact_score"),
+        priority=row.get("priority"), gap=row.get("gap_days"),
         reasons="；".join(reasons) if isinstance(reasons, list) else str(reasons),
     )
     # json_mode=False：這是要給人讀的信，不是要進資料表的結構化資料。

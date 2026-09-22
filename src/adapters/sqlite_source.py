@@ -215,7 +215,7 @@ class SqliteSource(DataSource):
         return [r[0] for r in rows]
 
     def closed_po_numbers(self, limit: int = 400) -> list[str]:
-        """已收貨結案的採購單（有 outcome，可用於校準）。"""
+        """已收貨結案的採購單（有實際到料日，供供應商歷史統計與回測使用）。"""
         with sqlite3.connect(self.db_path) as con:
             rows = con.execute(
                 "SELECT DISTINCT po_no FROM goods_receipt ORDER BY po_no LIMIT ?",

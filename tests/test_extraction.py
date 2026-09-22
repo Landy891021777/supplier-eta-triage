@@ -19,9 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import extract_rules  # noqa: E402
-from domain import ChangeType, CommitmentStrength  # noqa: E402
+from domain import ChangeType  # noqa: E402
 from handcrafted_emails import HANDCRAFTED  # noqa: E402
-from impact import evaluate  # noqa: E402
 
 HC = {e["email_id"]: e for e in HANDCRAFTED}
 
@@ -110,110 +109,3 @@ def test_original_label_does_not_poison_next_line():
     text = "Original ETA : 2026-09-25\nRevised ETA  : 2026-10-09\n"
     pos = text.index("2026-10-09")
     assert extract_rules._nearest_label(text, pos) == "new"
-
-
-# ---------------------------------------------------------------------------
-# 影響評估：方向性必須正確
-# ---------------------------------------------------------------------------
-WEIGHTS = {k: 10 for k in [
-    "buffer_days", "delay_magnitude", "single_source", "downstream_scheduled",
-    "material_criticality", "commitment_strength", "reschedule_count",
-    "delay_share", "notice_lead_time", "substitutability"]}
-THRESH = {"P1": 70, "P2": 45}
-
-BASE_PO = {"committed_date": "2026-10-01", "need_date": "2026-10-20",
-           "downstream_scheduled": False, "reschedule_count": 0,
-           "share_of_period_demand": 0.3}
-BASE_MAT = {"has_qualified_second_source": True, "criticality": "low",
-            "std_lead_time_days": 30, "is_bottleneck": False,
-            "alt_material_id": "ALT-1"}
-
-
-def _score(rec_overrides=None, po_overrides=None, mat_overrides=None) -> float:
-    rec = {"new_eta": "2026-10-10", "committed_date": "2026-10-01",
-           "received_at": "2026-09-08", "change_type": ChangeType.DELAY.value,
-           "commitment_strength": CommitmentStrength.CONFIRMED.value}
-    rec.update(rec_overrides or {})
-    po = {**BASE_PO, **(po_overrides or {})}
-    mat = {**BASE_MAT, **(mat_overrides or {})}
-    return evaluate(rec, po, mat, {}, WEIGHTS, THRESH)["impact_score"]
-
-
-def test_negative_buffer_raises_impact():
-    """緩衝變負（趕不上）必須推高分數，這是第一順位規則。"""
-    ok = _score(po_overrides={"need_date": "2026-11-30"})
-    late = _score(po_overrides={"need_date": "2026-10-05"})
-    assert late > ok
-
-
-def test_unconfirmed_commitment_raises_impact():
-    """越不確定越該處理 —— 這條規則的方向反直覺，必須守住。"""
-    confirmed = _score({"commitment_strength": CommitmentStrength.CONFIRMED.value})
-    intent = _score({"commitment_strength": CommitmentStrength.INTENT_ONLY.value})
-    assert intent > confirmed
-
-
-def test_single_source_raises_impact():
-    dual = _score(mat_overrides={"has_qualified_second_source": True})
-    single = _score(mat_overrides={"has_qualified_second_source": False})
-    assert single > dual
-
-
-def test_repeat_offender_raises_impact():
-    first = _score(po_overrides={"reschedule_count": 0})
-    fourth = _score(po_overrides={"reschedule_count": 3})
-    assert fourth > first
-
-
-def test_no_change_scores_zero_and_leaves_action_list():
-    res = evaluate({"change_type": ChangeType.NO_CHANGE.value, "new_eta": None,
-                    "commitment_strength": CommitmentStrength.CONFIRMED.value,
-                    "received_at": "2026-09-08"},
-                   BASE_PO, BASE_MAT, {}, WEIGHTS, THRESH)
-    assert res["impact_score"] == 0.0
-    assert res["priority"] == "—", "確認不變的案件不應進入行動清單"
-
-
-def test_pull_in_is_capped():
-    """提前交貨要處理倉容與付款，但不該和斷料排在一起。"""
-    res = evaluate({"change_type": ChangeType.PULL_IN.value, "new_eta": "2026-09-20",
-                    "commitment_strength": CommitmentStrength.CONFIRMED.value,
-                    "received_at": "2026-09-08"},
-                   {**BASE_PO, "need_date": "2026-09-15"},
-                   {**BASE_MAT, "has_qualified_second_source": False,
-                    "criticality": "high", "is_bottleneck": True},
-                   {}, WEIGHTS, THRESH)
-    assert res["impact_score"] <= 40.0
-
-
-# ---------------------------------------------------------------------------
-# 空值處理（回歸測試）
-# ---------------------------------------------------------------------------
-def test_nan_alt_material_is_treated_as_no_alternative():
-    """
-    回歸測試：料號主檔的「替代料」欄位在 CSV 裡是空字串，
-    用 pandas 讀進來會變成 float NaN，而 str(NaN) == "nan" 是非空字串。
-
-    早期版本因此對生管顯示「有替代料 nan 可評估」，
-    並錯誤地把影響分數往下調 —— 畫面出現看不懂的字，優先序也算錯了。
-    """
-    import math
-    from impact import rule_substitutability
-
-    for empty in (float("nan"), None, "", "  ", "NaN", "None"):
-        score, why = rule_substitutability({"material": {"alt_material_id": empty}})
-        assert score == 1.00, f"{empty!r} 應視為無替代料"
-        assert "nan" not in why.lower(), f"理由文字不可出現 nan：{why}"
-
-    score, why = rule_substitutability({"material": {"alt_material_id": "WF-N7-KL2211"}})
-    assert score == 0.20
-    assert "WF-N7-KL2211" in why
-
-
-def test_clean_str_normalises_empty_values():
-    from impact import _clean_str
-
-    assert _clean_str(float("nan")) == ""
-    assert _clean_str(None) == ""
-    assert _clean_str("nan") == ""
-    assert _clean_str("  WF-1  ") == "WF-1"

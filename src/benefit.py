@@ -15,14 +15,12 @@
 ==================================================================
 
 關於 Recall@K 的循環性（必須說明，不可省略）：
-    下面用「實際缺口天數 > 0」當作 outcome 來評估排序品質。
-    這個 outcome 是由 need_date 與 new_eta 直接算出的客觀事實，
-    不是評分卡的輸出 —— 但評分卡的規則 1（緩衝天數，權重 25）
-    確實使用了同樣的訊號，因此這個比較對本工具有利。
+    下面用「新預計到料日 − 需求日 > 0」當作 outcome，這是兩個日期相減的
+    客觀事實。但排序鍵「預估缺料天數」是同一個式子再加上歷史落差，
+    所以這個比較對本工具有利，只能說明排序有把缺料訊號推到前段。
 
-    它能證明的是：排序邏輯有效地把緩衝訊號傳遞到清單前段。
-    它不能證明：工具能預測任何未知的未來結果。
-    真實效能必須上線後以 A/B 驗證。
+    真正的驗證是 src/backtest.py 的時間切分回測（用實際收貨日當 outcome、
+    不偷看未來），結果見 output/回測結果.md。
 """
 from __future__ import annotations
 
@@ -97,7 +95,7 @@ def compare_strategies(df: pd.DataFrame, k: int, n_random: int = 200,
         rand_scores.append(recall_at_k(df, "_rand", k))
 
     rows = [
-        {"策略": "本工具（影響分數排序）", "Recall@K": recall_at_k(df, "impact_score", k)},
+        {"策略": "本工具（預估缺料天數排序）", "Recall@K": recall_at_k(df, "gap_days", k)},
         {"策略": "土法：依延遲天數排序", "Recall@K": recall_at_k(df, "_delay_days", k)},
         {"策略": "現況：依收信時間 (FCFS)", "Recall@K": recall_at_k(df, "_fcfs", k, ascending=True)},
         {"策略": f"隨機抽查（{n_random} 次平均）", "Recall@K": float(np.nanmean(rand_scores))},

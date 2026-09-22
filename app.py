@@ -9,7 +9,7 @@
    同仁早上只有十分鐘，工具必須在十秒內講完重點。
 
 2. **每個判斷都能追問「為什麼」。**
-   每一筆都可以展開看到十條規則各拿幾分、扣分理由是什麼。
+   每一筆都可以展開看到預估缺料天數怎麼算出來、依據哪些事實旗標分級。
    說不出理由的排序，同仁用兩週就會棄用。
 
 3. **不確定的地方要顯眼，不要藏。**
@@ -42,7 +42,7 @@ PRIORITY_COLOR = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "待查": "⚪", "�
 
 @st.cache_data(show_spinner="解析信件中…")
 def load_pipeline(use_llm: bool):
-    """解析結果快取。權重調整不會觸發重跑，避免重複呼叫 LLM。"""
+    """解析結果快取：介面互動不會觸發重跑，避免重複呼叫 LLM。"""
     return pipeline.run(use_llm=use_llm)
 
 
@@ -86,67 +86,10 @@ def main() -> None:
     st.sidebar.caption(f"**資料來源**：{pipeline.get_data_source(cfg).describe()}")
 
     st.sidebar.divider()
-    st.sidebar.subheader("① 影響評估權重")
-    st.sidebar.caption(
-        "**這是「相對份量」，不是分數。**\n\n"
-        "十條規則各自算出 0~1 的得分，再依這裡的份量加權平均，"
-        "換算成 0~100 的影響分數。所以你只要在意**相對大小** — "
-        "把某條調成兩倍，代表它的話語權變兩倍。\n\n"
-        "這十條規則來自供應商端與物料企劃的實務判斷。"
-        "不同意哪一條的份量，直接調，清單會立刻重排 — "
-        "工具要能被質疑，才會被使用。"
-    )
-    labels = {
-        "buffer_days": "1. 緩衝天數（距下游需求日）",
-        "delay_magnitude": "2. 延遲幅度（延幾天）",
-        "single_source": "3. 單一來源（有無二源）",
-        "downstream_scheduled": "4. 下游已排定",
-        "material_criticality": "5. 料的關鍵性（瓶頸／長LT）",
-        "commitment_strength": "6. 承諾強度（是否真的承諾）",
-        "reschedule_count": "7. 累犯（已改期幾次）",
-        "delay_share": "8. 延遲量佔需求比例",
-        "notice_lead_time": "9. 通知時機（多晚才講）",
-        "substitutability": "10. 可替代性（有無替代料）",
-    }
-    weights = {}
-    for key, label in labels.items():
-        weights[key] = st.sidebar.slider(label, 0, 40, int(cfg["impact_weights"][key]), 1)
-
-    # 把「相對份量」換算成「實際佔比」顯示出來。
-    # 沒有這個對照，使用者看到滑桿上的 25 會誤以為那是分數。
-    total_w = sum(weights.values())
-    if total_w > 0:
-        share = " ｜ ".join(
-            f"{labels[key].split('.')[0]}:{weights[key] / total_w * 100:.0f}%"
-            for key in labels if weights[key] > 0)
-        st.sidebar.caption(f"目前份量總和 **{total_w}**，換算後各條佔比：\n\n{share}")
-    else:
-        st.sidebar.error("所有權重都是 0，無法評分。請至少給一條規則份量。")
-
-    st.sidebar.divider()
-    st.sidebar.subheader("② 優先級門檻")
-    st.sidebar.caption(
-        "**這裡才是分數，範圍 0~100。**\n\n"
-        "上面的權重決定每張單得幾分，這裡決定幾分以上要今天處理。"
-        "門檻調低 → 清單變長、不會漏但會累；調高 → 清單變短、省力但可能漏。"
-        "這個取捨由使用單位自己決定。"
-    )
-    p1 = st.sidebar.slider("P1 門檻：幾分以上今天要處理", 40, 95,
-                           int(cfg["priority_thresholds"]["P1"]))
-    p2 = st.sidebar.slider("P2 門檻：幾分以上本週要追", 10, 90,
-                           int(cfg["priority_thresholds"]["P2"]))
-    if p2 >= p1:
-        st.sidebar.warning(
-            f"P2 門檻（{p2}）不低於 P1 門檻（{p1}），這樣不會有任何 P2 案件。"
-            "通常 P2 應該設得比 P1 低。")
-
-    st.sidebar.divider()
-    st.sidebar.subheader("③ 效益試算參數")
-    k = st.sidebar.number_input("生管每日可仔細追的案件數 (K)", 5, 100,
+    st.sidebar.subheader("效益試算參數")
+    k = st.sidebar.number_input("物料企劃每日可仔細追的案件數 (K)", 5, 100,
                                 int(cfg["benefit"]["daily_review_capacity"]))
     st.sidebar.caption("僅影響「效益量化」分頁的 Recall@K，不影響行動清單排序。")
-
-    thresholds = {"P1": p1, "P2": max(p2, 0)}
 
     # ---------------- 資料 ----------------
     try:
@@ -155,8 +98,7 @@ def main() -> None:
         st.error(f"{e}")
         st.stop()
 
-    actions = pipeline.rescore(result["all"], weights, thresholds)
-    actions = actions[actions["priority"] != "—"].reset_index(drop=True)
+    actions = result["actions"].copy()
 
     stats = dict(result["stats"])
     stats.update(
@@ -182,15 +124,15 @@ def main() -> None:
 
     # 分頁順序依使用情境排列：生管每天用的在前，驗證與稽核用的在後。
     # 以具名變數取代 tabs[0]～tabs[6] 索引：插入或調整分頁時不會整批錯位。
-    (t_actions, t_search, t_erp, t_calib,
+    (t_actions, t_search, t_erp, t_history,
      t_experiment, t_benefit, t_trace, t_emails) = st.tabs([
-        "📋 今日行動清單", "🔎 物料智能檢索", "📄 ERP 單據", "⚖️ 供應商歷史與權重",
+        "📋 今日行動清單", "🔎 物料智能檢索", "📄 ERP 單據", "⚖️ 供應商歷史",
         "🧪 評估實驗", "📊 效益量化", "🔍 解析軌跡", "📨 原始信件"])
 
     # ==================== 分頁 1：行動清單 ====================
     with t_actions:
         st.subheader("今日行動清單")
-        st.caption("依影響分數排序。展開任一筆可看到十條規則各拿幾分，以及回信草稿。")
+        st.caption("依預估缺料天數排序（缺越多天越前面）。展開任一筆可看到為什麼、建議動作，以及回信草稿。")
 
         fcol1, fcol2, fcol3 = st.columns([1, 1, 2])
         pick = fcol1.multiselect("優先級", ["P1", "P2", "P3", "待查"],
@@ -209,11 +151,12 @@ def main() -> None:
             st.info("目前條件下沒有待處理案件。")
         else:
             st.dataframe(
-                view[["priority", "impact_score", "po_no", "material_id",
+                view[["priority", "gap_days", "conservative_eta", "po_no", "material_id",
                       "supplier_name", "committed_date", "new_eta",
                       "commitment_strength", "needs_human_review"]]
                 .rename(columns={
-                    "priority": "優先級", "impact_score": "影響分數", "po_no": "採購單號",
+                    "priority": "優先級", "gap_days": "預估缺料天數", "conservative_eta": "保守到料日",
+                    "po_no": "採購單號",
                     "material_id": "料號", "supplier_name": "供應商",
                     "committed_date": "原承諾日", "new_eta": "新交期",
                     "commitment_strength": "承諾強度", "needs_human_review": "需人工確認"}),
@@ -226,12 +169,12 @@ def main() -> None:
                 flag = " ⚠️ 需人工確認" if row["needs_human_review"] else ""
                 header = (f"{icon} **{row['priority']}**　{row['po_no']}　"
                           f"{row['material_id']}　{row['supplier_name']}　"
-                          f"（影響分數 {row['impact_score']}）{flag}")
+                          f"（{_fmt_gap(row['gap_days'])}）{flag}")
                 with st.expander(header):
                     a, b = st.columns([3, 2])
                     with a:
                         st.markdown("**為什麼是這個優先級**")
-                        for r in (row["top_reasons"] or []):
+                        for r in (row["reasons"] or []):
                             st.markdown(f"- {r}")
                         if row.get("note"):
                             st.info(row["note"])
@@ -241,30 +184,11 @@ def main() -> None:
                                 "原因：供應商未明確承諾、或解析信心不足。"
                                 "交期資料錯誤會連動整條下游排程，"
                                 "因此寫回 ERP 必須由人確認後執行。")
-                        st.markdown("**十條規則明細**")
-                        detail = pd.DataFrame(row["rule_details"])
-                        detail["rule"] = detail["rule"].map(labels).fillna(detail["rule"])
-                        st.dataframe(
-                            detail.rename(columns={
-                                "rule": "規則", "score": "得分(0~1)", "weight": "權重",
-                                "contribution": "貢獻", "explain": "理由"}),
-                            width="stretch", hide_index=True)
+                        if row["actions"]:
+                            st.markdown("**建議動作**")
+                            for a in row["actions"]:
+                                st.markdown(f"- {a}")
                     with b:
-                        # 供應商歷史表現：把 ERP 收貨紀錄變成當下用得到的判斷依據。
-                        # 生管看到「他說 10/29」時，真正想知道的是
-                        # 「這家供應商說的話能信幾分、實際大概哪天到」。
-                        hist = _supplier_history(row.get("supplier_id"),
-                                                 row.get("new_eta") or row.get("committed_date"))
-                        if hist:
-                            st.markdown("**供應商歷史表現（近 12 個月）**")
-                            if hist.get("available"):
-                                st.metric("保守到料日（歷史 P80）", hist["conservative"],
-                                          delta=f"較承諾日 +{hist['delay_days']} 天",
-                                          delta_color="inverse")
-                                st.caption(hist["note"] + "。此為歷史統計，非預測模型。")
-                            else:
-                                st.caption(hist.get("reason", ""))
-                            st.divider()
                         st.markdown("**原始信件**")
                         st.caption(f"{row['email_id']}｜{row['subject']}")
                         st.text(str(row.get("notes", ""))[:400])
@@ -283,7 +207,8 @@ def main() -> None:
 
             st.download_button(
                 "⬇️ 匯出行動清單 CSV",
-                view.drop(columns=["rule_details", "top_reasons"], errors="ignore")
+                view.assign(reasons=view["reasons"].map("；".join),
+                            actions=view["actions"].map("；".join))
                     .to_csv(index=False).encode("utf-8-sig"),
                 file_name="行動清單.csv", mime="text/csv")
 
@@ -312,9 +237,10 @@ def main() -> None:
         st.dataframe(rep["strategies"], width="stretch", hide_index=True)
         st.info(
             f"本批共 {rep['n_actions']} 件，其中 {rep['n_will_be_short']} 件實際會來不及。\n\n"
-            "**必須說明的限制**：影響分數的規則 1（緩衝天數）使用了與 outcome "
-            "相同的訊號，因此這個比較對本工具有利。它證明的是排序邏輯有效地把"
-            "緩衝訊號傳遞到清單前段，**不能**證明工具可以預測未知結果。")
+            "**必須說明的限制**：排序鍵「預估缺料天數」與 outcome 用了同樣的緩衝天數"
+            "訊號，因此這個比較對本工具有利。它證明的是排序邏輯有效地把"
+            "緩衝訊號傳遞到清單前段，**不能**證明工具可以預測未知結果。"
+            "真正的驗證見「評估實驗」分頁與 `output/回測結果.md`。")
 
         st.markdown("#### 三、工時敏感度分析")
         st.dataframe(rep["sensitivity"], width="stretch", hide_index=True)
@@ -353,7 +279,7 @@ def main() -> None:
                     "po_item": "採購單項次 ≈ EKPO",
                     "po_schedule": "交貨排程行 ≈ EKET（承諾日的來源）",
                     "po_change_log": "變更文件 ≈ CDHDR/CDPOS（改期次數的來源）",
-                    "goods_receipt": "收貨紀錄 ≈ MKPF/MSEG（未來校準權重的 outcome）",
+                    "goods_receipt": "收貨紀錄 ≈ MKPF/MSEG（保守到料日估計與回測的 outcome）",
                 }
                 st.dataframe(
                     pd.DataFrame([{"資料表": t, "筆數": c, "對應（SAP 為例）": sap.get(t, "")}
@@ -361,7 +287,7 @@ def main() -> None:
                     width="stretch", hide_index=True)
                 st.caption(
                     "`goods_receipt` 刻意為空：它代表工具上線後才會累積的真實結果，"
-                    "也是未來用資料校準規則權重的唯一來源。"
+                    "也是供應商歷史統計、保守到料日估計與時間切分回測的唯一來源。"
                     "表名與結構是參考公開資料整理的近似版本，非任何公司的真實 schema。")
 
         st.dataframe(
@@ -414,7 +340,8 @@ def main() -> None:
         else:
             c1, c2 = st.columns([1, 2])
             kind = c1.radio("單據狀態", ["在途（未收貨）", "已結案（有收貨）"],
-                            help="已結案的單有實際到料日，是權重校準的資料來源。")
+                            help="已結案的單有實際到料日，是供應商歷史統計、"
+                                 "保守到料日估計與時間切分回測的資料來源。")
             pool = (src6.open_po_numbers() if kind.startswith("在途")
                     else src6.closed_po_numbers())
             if not pool:
@@ -434,63 +361,28 @@ def main() -> None:
                     "注意第 ④ 與第 ⑤ 張表：**承諾日不在採購單頭，改期次數也沒有現成欄位**。"
                     "工具必須自己 JOIN 與 COUNT — 這就是接 ERP 真正的工作量所在。")
 
-    # ==================== 分頁 7：權重校準 ====================
-    with t_calib:
-        st.subheader("權重校準：資料同不同意我訂的權重")
+    # ==================== 分頁 7：供應商歷史 ====================
+    with t_history:
+        st.subheader("供應商歷史表現")
         st.caption(
-            "評分卡的權重是依實務直覺訂的假設。一旦累積了歷史結果"
-            "（實際到料日 vs 下游需求日），就可以反過來檢驗它。")
+            "行動清單上的「保守到料日」來自這裡：這家供應商說定日期之後，"
+            "過去實際還會晚幾天。只用「曾改期過的單」估計，因為你收到的都是已經跳票的通知。")
         st.warning(
-            "⚠️ **本頁使用模擬歷史資料，係數僅供展示流程，不可用於決策。**\n\n"
-            "歷史結果由 `src/generate_history.py` 的因果模型產生，非真實資料。"
-            "在真實環境，這裡的輸入應該是 ERP 的收貨紀錄。")
+            "⚠️ **本頁使用模擬歷史資料。** 歷史結果由 `src/generate_history.py` 的因果模型產生，"
+            "非真實資料；在真實環境，輸入應該是 ERP 的收貨紀錄。")
         try:
-            st.markdown("#### 一、歷史單據直接給生管的判斷依據")
-            st.caption(
-                "在讓資料去校準權重之前，歷史單據更直接的用途是回答生管當下的問題："
-                "這家供應商說的話能信幾分？以下兩張表就是行動清單上「保守到料日」的來源。")
             pcol, rcol = st.columns([3, 2])
             with pcol:
                 st.markdown("**各供應商歷史表現**")
                 st.dataframe(_supplier_performance(), width="stretch",
-                             hide_index=True, height=260)
+                             hide_index=True, height=300)
             with rcol:
                 st.markdown("**改期次數 vs 最終是否延遲**")
                 st.dataframe(_reschedule_reliability(), width="stretch",
                              hide_index=True)
                 st.caption(
-                    "這張表在**驗證規則 7（累犯）**：改期越多次的單，最終仍延遲的"
-                    "比例越高。若資料顯示無關，這條規則就該被拿掉 —— "
-                    "工具必須容許自己的規則被自己的資料推翻。")
-            st.divider()
-            st.markdown("#### 二、用歷史結果回頭校準十條權重")
-
-            res = _run_calibration()
-            m1, m2, m3 = st.columns(3)
-            m1.metric("已結案樣本", res["n_total"])
-            m2.metric("實際造成缺料", f"{res['n_shortage']}（{res['shortage_rate']:.1%}）")
-            m3.metric("人訂 vs 學習 AUC",
-                      f"{res['auc_hand']:.3f} → {res['auc_model']:.3f}")
-            t = res["table"].copy()
-            t.index.name = "規則"
-            t = t.reset_index()
-            t["規則"] = t["規則"].map(labels).fillna(t["規則"])
-            st.dataframe(t, width="stretch", hide_index=True)
-            st.info(
-                "**「方向相反」不等於規則錯 — 這是本次校準最重要的發現。**\n\n"
-                "校準的 outcome 是「會不會缺料」，衡量的是**發生機率**。"
-                "但「下游已排定」「延遲量佔比」「可替代性」預測的根本不是機率，"
-                "而是**缺了之後有多痛**（代價）。\n\n"
-                "下游有沒有排定產能，不會改變供應商延不延；"
-                "但它決定延了之後要動幾條排程、要不要跟客戶道歉。\n\n"
-                "**評分卡本來就在混合兩件事：發生機率 × 影響代價。**"
-                "歷史資料只能校準機率那一半 — 除非公司有在記錄每次缺料的實際損失。")
-            st.markdown(
-                "**沒有被校準的規則：`commitment_strength`（承諾強度）**\n\n"
-                "訊號來自信件語氣，而 ERP 只存結果、不存語氣。"
-                "歷史資料裡根本沒有這個欄位，必須等工具上線後自行累積。"
-                "這一條校準不了，恰好說明了這個工具存在的理由："
-                "**它產生的是 ERP 結構上不會有的資料。**")
+                    "改期越多次的單，最終仍延遲的比例是否越高？這是保守到料日"
+                    "只用「改期過的單」的依據。若資料顯示無關，估計就不該把改期單獨立出來。")
         except (FileNotFoundError, RuntimeError) as e:
             st.info(f"{e}\n\n請先執行： `py src/generate_history.py`")
 
@@ -585,12 +477,6 @@ def _render_search_tab(reference_date: str) -> None:
                 st.text(hit.card.text)
 
 
-@st.cache_data(show_spinner="校準中…")
-def _run_calibration():
-    import calibrate as calib
-    return calib.calibrate()
-
-
 @st.cache_data(show_spinner=False)
 def _supplier_performance():
     import supplier_stats
@@ -603,22 +489,12 @@ def _reschedule_reliability():
     return supplier_stats.reschedule_reliability()
 
 
-@st.cache_data(show_spinner=False)
-def _outcomes():
-    import supplier_stats
-    return supplier_stats.load_outcomes()
-
-
-def _supplier_history(supplier_id, promised):
-    """查供應商歷史表現；沒有歷史資料時安靜略過，不讓畫面壞掉。"""
-    if not supplier_id or not promised:
-        return None
-    try:
-        import supplier_stats
-        return supplier_stats.conservative_eta(
-            supplier_id, promised, _outcomes())
-    except (FileNotFoundError, RuntimeError):
-        return None
+def _fmt_gap(gap) -> str:
+    """預估缺料天數的人話：缺 N 天／尚有 N 天緩衝。"""
+    if gap is None or gap != gap:
+        return "無法估計"
+    g = int(gap)
+    return f"預估缺料 {g} 天" if g > 0 else f"尚有 {-g} 天緩衝"
 
 
 if __name__ == "__main__":

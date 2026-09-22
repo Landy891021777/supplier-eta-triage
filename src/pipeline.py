@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-主流程編排：信件 → 分層解析 → 對位 PO → 影響評估 → 行動清單。
+主流程編排：信件 → 分層解析 → 對位 PO → 分級 → 行動清單。
 
 流程設計的三個關鍵決定：
 
@@ -26,10 +26,11 @@ import yaml
 
 import extract_llm
 import extract_rules
+import triage
 from adapters import get_source
 from domain import ChangeType, CommitmentStrength
-from impact import evaluate
 from llm.provider import get_provider
+from supplier_stats import estimate_delay, load_outcomes
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -77,6 +78,29 @@ def load_ground_truth() -> list[dict]:
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
 
 
+_OUTCOME_COLUMNS = ["supplier_id", "delay_days", "reschedule_count"]
+
+
+def _load_outcomes() -> pd.DataFrame:
+    """
+    歷史收貨紀錄。讀不到時回傳空表 —— 之後每一筆都會明確標示
+    「歷史樣本不足」，而不是悄悄假裝有估計。
+    """
+    try:
+        return load_outcomes()
+    except (FileNotFoundError, RuntimeError):
+        return pd.DataFrame(columns=_OUTCOME_COLUMNS)
+
+
+def _sort_by_urgency(df: pd.DataFrame) -> pd.DataFrame:
+    """先依分級，同級內依預估缺料天數由大到小，最後依收信時間。"""
+    rank = df["priority"].map(triage.PRIORITY_RANK).fillna(9)
+    return (df.assign(_rank=rank)
+              .sort_values(["_rank", "gap_days", "received_at"],
+                           ascending=[True, False, True], na_position="last")
+              .drop(columns="_rank").reset_index(drop=True))
+
+
 # ---------------------------------------------------------------------------
 def extract_one(email: dict, cfg: dict, known_pos: list[str],
                 provider=None, use_llm: bool = True) -> tuple[list[dict], dict]:
@@ -121,12 +145,10 @@ def extract_one(email: dict, cfg: dict, known_pos: list[str],
     return rule_records, trace
 
 
-def run(cfg: dict | None = None, use_llm: bool = True,
-        weights: dict | None = None) -> dict:
+def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
     """執行完整流程，回傳可直接餵給 UI 的結果集。"""
     cfg = cfg or load_config()
-    weights = weights or cfg["impact_weights"]
-    thresholds = cfg["priority_thresholds"]
+    tcfg = cfg["triage"]
     as_of = date.fromisoformat(cfg["data_generation"]["as_of_date"])
 
     source = get_data_source(cfg)
@@ -136,6 +158,7 @@ def run(cfg: dict | None = None, use_llm: bool = True,
     po_index = pos_df.set_index("po_no").to_dict("index")
     mat_index = mats_df.set_index("material_id").to_dict("index")
     sup_index = sups_df.set_index("supplier_id").to_dict("index")
+    outcomes = _load_outcomes()
 
     provider = get_provider() if use_llm else None
     llm_available = bool(provider and provider.available)
@@ -168,8 +191,9 @@ def run(cfg: dict | None = None, use_llm: bool = True,
                 # 對不到 PO 主檔 —— 不能靜默丟掉，這通常代表 PO 號打錯或
                 # 是別的單位的單，必須讓人看到。
                 rows.append({**rec, "po_no": po_no, "matched": False,
-                             "impact_score": 0.0, "priority": "待查",
-                             "top_reasons": ["信中的 PO 號對不到主檔，需人工確認"],
+                             "gap_days": None, "priority": "待查",
+                             "reasons": ["信中的 PO 號對不到主檔，需人工確認"],
+                             "actions": [],
                              "needs_human_review": True, "note": ""})
                 continue
 
@@ -190,7 +214,13 @@ def run(cfg: dict | None = None, use_llm: bool = True,
                 except ValueError:
                     pass
 
-            result = evaluate(rec, po, material, supplier, weights, thresholds)
+            # 信裡沒給新日期時，不論模型把承諾強度判成什麼，都取最保守的百分位。
+            strength = (rec.get("commitment_strength") if rec.get("new_eta")
+                        else "none")
+            pct = triage.percentile_for(strength, tcfg)
+            estimate = estimate_delay(outcomes, po["supplier_id"], percentile=pct,
+                                      min_samples=int(tcfg["min_samples"]))
+            result = triage.evaluate(rec, po, material, tcfg, estimate)
 
             # ---- 人工確認閘門 ----
             gate = set(cfg["extraction"]["require_human_review_when"])
@@ -213,18 +243,20 @@ def run(cfg: dict | None = None, use_llm: bool = True,
                 "reschedule_count": po["reschedule_count"],
                 "has_second_source": material.get("has_qualified_second_source", False),
                 "is_bottleneck": material.get("is_bottleneck", False),
-                # 以下欄位是為了讓 UI 能在使用者調整權重時「就地重算」影響分數，
-                # 而不必重跑一次解析（重跑會再次呼叫 LLM，既慢又花錢）。
                 "share_of_period_demand": po.get("share_of_period_demand"),
                 "criticality": material.get("criticality", ""),
                 "std_lead_time_days": material.get("std_lead_time_days", 0),
                 "alt_material_id": material.get("alt_material_id", ""),
                 "supplier_name": supplier.get("supplier_name", ""),
                 "supplier_otd": supplier.get("historical_otd_rate", None),
-                "impact_score": result["impact_score"],
+                "gap_days": result["gap_days"],
+                "conservative_eta": result["conservative_eta"],
+                "delay_days_est": result["delay_days_est"],
+                "delay_basis": result["delay_basis"],
+                "delay_n": result["delay_n"],
                 "priority": result["priority"],
-                "top_reasons": result["top_reasons"],
-                "rule_details": result["rule_details"],
+                "reasons": result["reasons"],
+                "actions": result["actions"],
                 "note": result["note"],
                 "needs_human_review": needs_review,
             })
@@ -243,8 +275,7 @@ def run(cfg: dict | None = None, use_llm: bool = True,
             .reset_index(drop=True))
 
     actionable = df[df["priority"].isin(["P1", "P2", "P3", "待查"])].copy()
-    actionable = actionable.sort_values(
-        ["impact_score", "received_at"], ascending=[False, True]).reset_index(drop=True)
+    actionable = _sort_by_urgency(actionable)
 
     stats = {
         "emails_processed": len(emails),
@@ -266,48 +297,12 @@ def run(cfg: dict | None = None, use_llm: bool = True,
             "data_source": source.describe()}
 
 
-def rescore(df: pd.DataFrame, weights: dict, thresholds: dict) -> pd.DataFrame:
-    """
-    以新的權重就地重算影響分數，不重跑解析。
-
-    這個函式存在的理由很實際：使用者在 UI 上拉權重滑桿時，
-    每動一次就重跑一次解析會再次呼叫 LLM API —— 又慢又花錢，
-    而且同一批信重複送出去也是不必要的資料外流。
-    解析結果與評分邏輯必須分離，這是工具能被同仁反覆試玩的前提。
-    """
-    if df.empty:
-        return df
-    out = []
-    for _, r in df.iterrows():
-        row = r.to_dict()
-        if not row.get("matched", False):
-            out.append(row)
-            continue
-        po = {"need_date": row.get("need_date"), "committed_date": row.get("committed_date"),
-              "downstream_scheduled": row.get("downstream_scheduled"),
-              "reschedule_count": row.get("reschedule_count"),
-              "share_of_period_demand": row.get("share_of_period_demand")}
-        material = {"has_qualified_second_source": row.get("has_second_source"),
-                    "criticality": row.get("criticality"),
-                    "std_lead_time_days": row.get("std_lead_time_days"),
-                    "is_bottleneck": row.get("is_bottleneck"),
-                    "alt_material_id": row.get("alt_material_id")}
-        res = evaluate(row, po, material, {}, weights, thresholds)
-        row.update(impact_score=res["impact_score"], priority=res["priority"],
-                   top_reasons=res["top_reasons"], rule_details=res["rule_details"],
-                   note=res["note"])
-        out.append(row)
-    return (pd.DataFrame(out)
-            .sort_values(["impact_score", "received_at"], ascending=[False, True])
-            .reset_index(drop=True))
-
-
 if __name__ == "__main__":
     import sys
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     out = run(use_llm=True)
     print(json.dumps(out["stats"], ensure_ascii=False, indent=2))
-    cols = ["priority", "impact_score", "po_no", "material_id", "supplier_name",
+    cols = ["priority", "gap_days", "po_no", "material_id", "supplier_name",
             "new_eta", "commitment_strength", "needs_human_review"]
     print(out["actions"][cols].head(15).to_string(index=False))

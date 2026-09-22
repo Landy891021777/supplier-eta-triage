@@ -140,7 +140,7 @@ CREATE TABLE po_change_log (
 
 -- 收貨紀錄 (≈ SAP MKPF/MSEG)。實際到料日，也就是「後來到底怎麼了」。
 -- 本程式建立時為空；歷史單據與收貨紀錄由 generate_history.py 另外寫入。
--- 它是供應商準交表現與權重校準的唯一資料來源。
+-- 它是供應商歷史統計、保守到料日估計與時間切分回測的唯一資料來源。
 CREATE TABLE goods_receipt (
     gr_no        TEXT PRIMARY KEY,
     po_no        TEXT NOT NULL,
