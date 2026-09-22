@@ -271,9 +271,9 @@ def test_alternate_material_is_never_called_usable():
     替代料要過客戶與品保驗證（AVL），不能想換就換。
     資料表只知道有替代料，不知道它驗證過沒有，所以只能請品保確認。
     """
-    r = _run(est=_est(15), mat={"alt_material_id": "WF-N7-KL2211"})
+    r = _run(est=_est(15), mat={"alt_material_id": "SW-300-P-2211"})
     text = "；".join(r["actions"])
-    assert "WF-N7-KL2211" in text and "品保" in text
+    assert "SW-300-P-2211" in text and "品保" in text
     assert "可換料" not in text and "可直接" not in text
     assert "未確認前不可視為可用" in text
 
@@ -396,3 +396,65 @@ def test_shortage_beyond_gr_days_does_not_suggest_iqc():
     r = _run(new_eta="2026-10-30", est=_est(0),
              mat={"gr_processing_days": 1, "gr_source": "x"})
     assert not any("IQC" in a for a in r["actions"])
+
+
+def test_shortage_equal_to_gr_days_does_not_suggest_iqc():
+    """
+    缺的天數剛好等於收貨處理天數，代表要把檢驗壓縮到 0 天才趕得上——
+    這在實務上不可能，不該假裝是「企劃救得回來」的動作
+    （回歸：原本用 `<=` 會誤判這種剛好卡滿的單也救得回來）。
+    """
+    r = _run(new_eta="2026-10-20", est=_est(0),
+             mat={"gr_processing_days": 2, "gr_source": "x"})
+    assert r["gap_days"] == 2
+    assert not any("IQC" in a for a in r["actions"])
+
+
+def test_shortage_one_day_within_gr_days_suggests_expedited_inspection():
+    r = _run(new_eta="2026-10-19", est=_est(0),
+             mat={"gr_processing_days": 2, "gr_source": "x"})
+    assert r["gap_days"] == 1
+    assert any("縮短到 1 天" in a for a in r["actions"])
+
+
+def test_no_change_with_gr_days_still_shows_a_shortage():
+    """
+    供應商「確認照原計畫」代表承諾日沒變，不代表一定不缺料——光罩到廠
+    要 3 天檢驗＋上線驗證曝光，承諾日離需求日只有 2 天，加上收貨處理
+    天數後可投產日還是晚於需求日，一樣要進行動清單，不能因為信件標成
+    no_change 就直接丟掉（回歸：原本無條件回「—」）。
+    """
+    r = evaluate({"change_type": ChangeType.NO_CHANGE.value, "new_eta": None},
+                 {**PO, "committed_date": "2026-10-18", "need_date": "2026-10-20"},
+                 {**MAT, "gr_processing_days": 3, "gr_source": "光罩料別預設"},
+                 CFG, None)
+    assert r["priority"] in ("P1", "P2")
+    assert r["gap_days"] == 1
+    assert any("確認照原計畫" in s and "收貨處理 3 天" in s for s in r["reasons"])
+    assert len(r["actions"]) >= 1
+
+
+def test_no_change_without_gr_impact_still_drops_the_email():
+    """gr == 0（或承諾日離需求日夠遠）時，確認不變的信照舊不進行動清單。"""
+    r = evaluate({"change_type": ChangeType.NO_CHANGE.value, "new_eta": None},
+                 PO, MAT, CFG, _est(9))
+    assert r["priority"] == "—" and r["gap_days"] is None
+    assert r["actions"] == []
+
+
+def test_pull_in_with_gr_days_can_still_be_a_shortage():
+    """
+    提前到的日期，加上收貨處理天數後可能還是晚於需求日——光罩提前一天到，
+    但到廠後還要 3 天檢驗＋上線驗證曝光，不能因為「提前」兩字就走進
+    倉容那條輕鬆分支，一樣要照斷料分級走
+    （回歸：原本只比較收貨當天，忽略了收貨處理天數）。
+    """
+    r = _run(new_eta="2026-10-19", est=_est(0),
+             po={"need_date": "2026-10-20"},
+             mat={"gr_processing_days": 3, "gr_source": "光罩料別預設"},
+             rec={"change_type": ChangeType.PULL_IN.value})
+    assert r["gap_days"] == 2
+    assert r["priority"] == "P2"
+    assert "供應商提前交貨" not in r["reasons"]
+    assert any("供應商已提前到 2026-10-19，但仍晚於下游需求日" in s
+              for s in r["reasons"])

@@ -203,7 +203,27 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict) -> pd.
                     "alt_material_id": row.get("alt_material_id"),
                     "gr_processing_days": gr_days, "gr_source": gr_source}
 
-        if row.get("estimate_available"):
+        if "estimate_available" not in row:
+            # 相容舊格式的 all_df（例如 Task 7 之前產生、沒有這幾個原始欄位
+            # 的資料）：用 delay_n > 0 反推有沒有估計——有估計一定有算過
+            # 至少一筆歷史樣本，delay_n 才會是正的。百分位優先讀
+            # delay_percentile，沒有（或是 NaN）就照承諾強度現算，
+            # 跟 run() 選百分位的邏輯一致。
+            n = row.get("delay_n", 0)
+            try:
+                n = int(n) if not triage._missing(n) else 0
+            except (TypeError, ValueError):
+                n = 0
+            if n > 0:
+                pct = row.get("delay_percentile")
+                if triage._missing(pct):
+                    pct = triage.percentile_for(row.get("commitment_strength"), tcfg)
+                estimate = {"available": True, "delay_days": row.get("delay_days_est", 0),
+                            "percentile": pct, "basis": row.get("delay_basis", ""), "n": n}
+            else:
+                estimate = {"available": False, "n": n,
+                            "reason": row.get("estimate_reason") or "沒有歷史收貨紀錄"}
+        elif row.get("estimate_available"):
             estimate = {"available": True, "delay_days": row.get("delay_days_est", 0),
                         "percentile": row.get("delay_percentile"),
                         "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}

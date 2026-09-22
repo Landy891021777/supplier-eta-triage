@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,15 +62,41 @@ def test_unconfirmed_dates_still_need_human_review(result):
     assert df.loc[weak, "needs_human_review"].all()
 
 
-def test_retriage_on_all_reproduces_actions(result):
+def test_retriage_reproduces_runs_own_per_row_evaluation(result):
     """
-    retriage() 是唯一的分級路徑：對 result["all"] 重新分級（沒有任何覆寫）
-    必須跟 run() 產生的 actions 一致，否則兩套路徑會各自演化，企劃調完
-    收貨處理天數後看到的分級可能跟首頁對不上。
+    run() 對每一列直接呼叫一次 triage.evaluate（寫進 result["all"]）；
+    retriage() 是另一條路徑——從 all_df 重建 record/po/material/estimate
+    再呼叫 triage.evaluate 一次。這兩條路徑必須算出一樣的結果，否則
+    企劃調完收貨處理天數、呼叫 retriage() 重算時，看到的分級會跟
+    run() 剛產生的首頁對不上，而且沒有人會發現，因為兩邊各自看起來
+    都「正常執行完畢」。
+
+    比較的是 all_df 裡（run() 自己算的）欄位，不是 result["actions"]——
+    result["actions"] 本身就是拿 retriage(all, {}, tcfg) 的回傳值，
+    拿它跟 retriage(all, {}, tcfg) 比較沒有意義：兩邊根本是同一次呼叫，
+    不管 run() 或 retriage() 算錯了什麼，這種比法永遠會「一致」。
     """
     import pipeline
     tcfg = pipeline.load_config()["triage"]
-    replay = pipeline.retriage(result["all"], {}, tcfg)
-    left = result["actions"][["po_no", "priority", "gap_days"]].reset_index(drop=True)
-    right = replay[["po_no", "priority", "gap_days"]].reset_index(drop=True)
-    assert left.equals(right)
+    all_df = result["all"]
+    matched = all_df[all_df["matched"]].reset_index(drop=True)
+    assert len(matched) > 0, "測試資料裡沒有對到 PO 的列，這個一致性測試量不到東西"
+
+    replay = pipeline.retriage(all_df, {}, tcfg).set_index("po_no")
+
+    checked = 0
+    for _, row in matched.iterrows():
+        po_no = row["po_no"]
+        if row["priority"] == "—":
+            assert po_no not in replay.index, po_no
+            continue
+        r = replay.loc[po_no]
+        assert r["priority"] == row["priority"], po_no
+        # 「待查」時 gap_days 是 None／NaN，NaN != NaN，要分開比較。
+        same_gap = ((pd.isna(r["gap_days"]) and pd.isna(row["gap_days"]))
+                   or r["gap_days"] == row["gap_days"])
+        assert same_gap, po_no
+        assert r["reasons"] == row["reasons"], po_no
+        assert r["actions"] == row["actions"], po_no
+        checked += 1
+    assert checked > 0, "沒有任何一列走到有分級的比較，這個一致性測試量不到東西"
