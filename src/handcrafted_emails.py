@@ -8,7 +8,7 @@
     真實世界的供應商窗口是活人：他們會用相對日期、會中英夾雜、
     會在一封信裡講三張 PO、會轉寄一整串舊信、會用模糊措辭卸責。
 
-    以下每一封的寫法，都對應我實際看過的溝通型態。
+    以下每一封的寫法，都對應我實際看過的溝通型態（物料企劃視角）。
     ground_truth 是人工標註的正確答案，用來量化解析層的表現。
 
 欄位說明：
@@ -19,14 +19,14 @@ from __future__ import annotations
 HANDCRAFTED: list[dict] = [
     {
         "email_id": "HC-001",
-        "supplier_id": "SUP-F01",
+        "supplier_id": "SUP-W01",
         "received_at": "2026-09-07 09:14",
         "subject": "RE: PO Confirmation - PO-2026-04417",
         "body": (
             "Hi Jason,\n\n"
-            "PO-2026-04417 (WF-N6-XR3390) 這批我們這邊 loading 有點滿，\n"
+            "PO-2026-04417 (SW-300-E-3390) 這批磊晶片我們 epi 爐 loading 有點滿，\n"
             "原本 10/15 可能要往後抓個兩週，大概月底前後，我再跟你確認。\n"
-            "另外 PO-2026-04452 那顆先照原計畫走沒問題。\n\n"
+            "另外 PO-2026-04452 那批拋光片先照原計畫走沒問題。\n\n"
             "Thanks,\nAmy"
         ),
         "tags": ["relative_date", "vague", "multi_po", "mixed_language", "no_change_trap"],
@@ -45,15 +45,15 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-002",
-        "supplier_id": "SUP-F02",
+        "supplier_id": "SUP-W02",
         "received_at": "2026-09-07 11:02",
         "subject": "Delivery Schedule Update - Week 37",
         "body": (
             "Dear Customer,\n\n"
             "Please be informed of the following schedule revision:\n\n"
             "PO No.         Material        Original ETA   Revised ETA   Remark\n"
-            "PO-2026-04390  WF-N7-KL2210    2026-09-25     2026-10-09    Yield excursion at M1\n"
-            "PO-2026-04391  WF-N7-KL2210    2026-10-02     2026-10-16    Same lot family\n\n"
+            "PO-2026-04390  SW-300-P-2210   2026-09-25     2026-10-09    Yield excursion at final polish\n"
+            "PO-2026-04391  SW-300-P-2210   2026-10-02     2026-10-16    Same ingot lot\n\n"
             "Revised dates are confirmed and locked in our system.\n\n"
             "Best regards,\nPlanning Dept."
         ),
@@ -69,19 +69,19 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-003",
-        "supplier_id": "SUP-S01",
+        "supplier_id": "SUP-R02",
         "received_at": "2026-09-07 14:31",
-        "subject": "Fwd: RE: RE: 載板交期 SUB-FCCSP-1088",
+        "subject": "Fwd: RE: RE: 光阻交期 PR-ArF-1088",
         "body": (
             "------- Forwarded message -------\n"
             "From: Vendor Sales\n"
             "Date: 2026-08-12\n"
-            "Subject: RE: 載板交期\n"
+            "Subject: RE: 光阻交期\n"
             "> PO-2026-04205 我們預計 9/10 出貨，沒有問題。\n"
             "\n"
             "------- Latest -------\n"
             "王先生您好，\n\n"
-            "很抱歉上次回覆的 9/10 需要更新。因為上游 ABF 材料供應仍然吃緊，\n"
+            "很抱歉上次回覆的 9/10 需要更新。因為上游光酸（PAG）原料供應仍然吃緊，\n"
             "PO-2026-04205 目前最快要到 10 月中，我們排在 10/14。\n"
             "這個日期是我們生管確認過的。\n\n"
             "謝謝\n李"
@@ -96,14 +96,14 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-004",
-        "supplier_id": "SUP-F01",
+        "supplier_id": "SUP-G02",
         "received_at": "2026-09-07 16:45",
         "subject": "PO-2026-04501 可以提前",
         "body": (
             "Jason 你好，\n\n"
-            "PO-2026-04501 這批我們提前完成了，可以在 9/18 出，比原本的 9/30 早。\n"
-            "你們那邊倉庫收得下嗎？如果可以我們就安排。\n\n"
-            "Amy"
+            "PO-2026-04501 這批 NF3 鋼瓶我們提前充填完成，可以在 9/18 出，比原本的 9/30 早。\n"
+            "你們氣瓶區放得下嗎？如果可以我們就安排。\n\n"
+            "Kevin"
         ),
         "tags": ["pull_in", "chinese"],
         "ground_truth": [
@@ -116,13 +116,13 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-005",
-        "supplier_id": "SUP-F03",
+        "supplier_id": "SUP-C02",
         "received_at": "2026-09-08 08:20",
         "subject": "Re: Urgent - PO-2026-04333 status",
         "body": (
             "Hi,\n\n"
-            "We are trying our best to pull in the schedule. Currently the lot is still\n"
-            "at photo stage. I cannot commit a firm date at this moment, but 我們盡量\n"
+            "We are trying our best to pull in the schedule. Currently the batch is still\n"
+            "queued on our filling line, which is fully loaded. I cannot commit a firm date at this moment, but 我們盡量\n"
             "在下個月中之前出貨。Will update you by end of this week.\n\n"
             "Regards,\nDavid"
         ),
@@ -137,7 +137,7 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-006",
-        "supplier_id": "SUP-F02",
+        "supplier_id": "SUP-W02",
         "received_at": "2026-09-08 09:05",
         "subject": "Schedule confirmation",
         "body": (
@@ -159,7 +159,7 @@ HANDCRAFTED: list[dict] = [
         "email_id": "HC-007",
         "supplier_id": "SUP-M01",
         "received_at": "2026-09-08 10:12",
-        "subject": "光罩交期通知 MSK-N6-XR3390",
+        "subject": "光罩交期通知 MSK-N7-XR3390",
         "body": (
             "您好，\n\n"
             "關於 PO-2026-04120 光罩製作，因為前一版 data 有修改，\n"
@@ -177,14 +177,14 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-008",
-        "supplier_id": "SUP-F03",
+        "supplier_id": "SUP-T01",
         "received_at": "2026-09-08 11:40",
         "subject": "RE: Weekly review",
         "body": (
             "Hi team,\n\n"
             "Following up on the three open POs discussed last week:\n"
             "- PO-2026-04277: on track, ETA unchanged.\n"
-            "- PO-2026-04278: slipping by about 10 days due to a tool down event.\n"
+            "- PO-2026-04278: slipping by about 10 days due to a bonding furnace down event.\n"
             "  New target is around Oct 20 but not yet locked.\n"
             "- PO-2026-04279: we will need to push this one out to next quarter.\n"
             "  Sales will follow up separately.\n\n"
@@ -207,7 +207,7 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-009",
-        "supplier_id": "SUP-F01",
+        "supplier_id": "SUP-W01",
         "received_at": "2026-09-08 13:22",
         "subject": "PO-2026-04417 更新",
         "body": (
@@ -227,14 +227,14 @@ HANDCRAFTED: list[dict] = [
     },
     {
         "email_id": "HC-010",
-        "supplier_id": "SUP-S02",
+        "supplier_id": "SUP-T02",
         "received_at": "2026-09-08 15:08",
         "subject": "Q4 allocation notice",
         "body": (
             "Dear valued customer,\n\n"
             "Due to strong demand from other accounts, we regret to inform you that\n"
-            "allocation for Q4 has been adjusted. PO-2026-04188 quantity 5,000 will be\n"
-            "split: 2,000 pcs on the original date 2026-09-30, remaining 3,000 pcs\n"
+            "allocation for Q4 has been adjusted. PO-2026-04188 quantity 20 pcs will be\n"
+            "split: 8 pcs on the original date 2026-09-30, remaining 12 pcs\n"
             "deferred to 2026-11-15.\n\n"
             "We appreciate your understanding."
         ),
