@@ -217,6 +217,18 @@ FIXED_POS = [
 ]
 
 
+def _consistent_share(qty: int, target: float) -> float:
+    """
+    佔當期需求的比例，由「整數的當期需求量」反推，而不是直接抽一個比例。
+
+    踩坑紀錄：光罩一次只買 1 片，直接抽出「佔 70%」會得到當期需求 1/0.7 ≈ 1.4 片，
+    ERP 的請購單只能存整數 1 片，反推回來變成 100%，CSV 與模擬 ERP 的數字對不上。
+    先決定整數需求量再算比例，兩邊就一定一致。
+    """
+    period_qty = max(qty, int(round(qty / target)))
+    return round(qty / period_qty, 2)
+
+
 def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date) -> list[dict]:
     gr_days = _load_config()["receiving"]["gr_processing_days"]
     by_id = {m["material_id"]: m for m in materials}
@@ -264,11 +276,12 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
         buffer_days = (random.randint(gr, max(gr, 12)) if m["is_bottleneck"]
                       else random.randint(max(3, gr), 35))
         lt = int(m["std_lead_time_days"])
+        qty = random.choice(CATEGORY_SPEC[m["category"]]["qty"])
         rows.append({
             "po_no": f"PO-2026-{seq:05d}",
             "material_id": m["material_id"],
             "supplier_id": sup,
-            "qty": random.choice(CATEGORY_SPEC[m["category"]]["qty"]),
+            "qty": qty,
             "committed_date": committed.isoformat(),
             "need_date": (committed + timedelta(days=buffer_days)).isoformat(),
             # 領域假設：越接近交期，下游越可能已經排定。
@@ -276,7 +289,7 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
             # 領域假設：改期次數呈長尾 —— 多數 PO 沒改過，少數改到爛。
             #   而且改過的更容易再改（這正是「累犯」規則存在的理由）。
             "reschedule_count": random.choices([0, 1, 2, 3, 4], weights=[0.55, 0.22, 0.13, 0.07, 0.03])[0],
-            "share_of_period_demand": round(random.uniform(0.15, 1.0), 2),
+            "share_of_period_demand": _consistent_share(qty, random.uniform(0.15, 1.0)),
             "po_created_date": (committed - timedelta(days=lt + random.randint(0, 14))).isoformat(),
         })
     return rows

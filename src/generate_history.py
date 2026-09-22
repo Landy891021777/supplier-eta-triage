@@ -39,13 +39,11 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "erp_sim.db"
 
 HISTORY_MONTHS = 12
-# 領域假設修正後的副作用：數量改成依料別抽（見 I-1，跟 generate_data.py
-# 用同一份 domain.CATEGORY_SPEC），list 長度不同會讓 random.choice 消耗
-# 的亂數位元數跟著變，整條亂數序列因此跟舊版不同——SUP-W03 漂移前窗口的
-# 樣本數從原本 35 張左右掉到 14 張，低於方向性測試要求的 15 張門檻。
-# 900 → 950 只是把總樣本數調高，補回同一個供應商 × 同一段時間窗口該有
-# 的樣本量，不是為了讓測試變綠而調漂移量或門檻本身。
-N_HISTORY = 950
+# 歷史單總數的依據：每家供應商「改期過的已結案單」至少 20 張，
+# 保守到料日才有足夠樣本、不必退回全部單估計（估計的最低樣本數也是 20）。
+# 14 家供應商下，900 張時有 4 家不足、1200 張仍有 1 家不足，1500 張才全部達標。
+# 領域假設：一座晶圓廠一年對 14 家生產用料供應商下 1500 張採購單並不誇張。
+N_HISTORY = 1500
 SEED = 20260101
 
 
@@ -309,11 +307,10 @@ def build_history(verbose: bool = True, db_path: Path | str | None = None) -> di
         if n:
             print(f"       其中晚於承諾日          {late_commit:>6}  "
                   f"({late_commit / n * 100:.1f}%)")
-            print(f"       其中晚於下游需求日      {late_need:>6}  "
-                  f"({late_need / n * 100:.1f}%)  <- 造成缺料的")
-            print(f"       其中晚於下游需求日      {late_need_gr:>6}  "
-                  f"({late_need_gr / n * 100:.1f}%)  <- 加上收貨處理天數後，"
-                  "真正造成缺料的")
+            print(f"       到貨日晚於需求日        {late_need:>6}  "
+                  f"({late_need / n * 100:.1f}%)")
+            print(f"       可投產日晚於需求日      {late_need_gr:>6}  "
+                  f"({late_need_gr / n * 100:.1f}%)  <- 加上收貨處理天數，真正造成缺料的")
         print()
         print("       提醒：這些結果由因果模型產生，非真實資料。")
         print("       回測只能證明方法可行，不能證明真實供應商的行為。")

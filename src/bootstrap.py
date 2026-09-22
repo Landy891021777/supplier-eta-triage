@@ -33,6 +33,10 @@ ROOT = Path(__file__).resolve().parent.parent
 BASE_TABLES = ("vendor_master", "material_master", "source_list", "po_header",
                "po_item", "po_schedule", "purchase_req")
 CSV_FILES = ("po_master.csv", "materials.csv", "suppliers.csv")
+# 資料格式的版本標記：料號主檔加入收貨處理天數（≈ MARC-WEBAZ）之前產生的資料
+# 沒有這一欄。舊格式不能「默默補 0 天」繼續用 —— 畫面會把 0 天說成料別預設，
+# 所以判定為未備妥、整批重建。
+MATERIAL_COLUMN = "gr_processing_days"
 
 # Streamlit 的每個工作階段是同一個行程裡的執行緒，所以一把行程內的鎖就夠。
 _LOCK = threading.Lock()
@@ -45,7 +49,10 @@ def _no_step(label: str):
 def _csv_ready(root: Path) -> bool:
     data = root / "data"
     files = [data / n for n in CSV_FILES] + [data / "inbox" / "_index.json"]
-    return all(p.exists() and p.stat().st_size > 0 for p in files)
+    if not all(p.exists() and p.stat().st_size > 0 for p in files):
+        return False
+    with open(data / "materials.csv", encoding="utf-8-sig") as f:
+        return MATERIAL_COLUMN in f.readline()
 
 
 def db_state(db: Path) -> tuple[bool, bool]:
@@ -59,8 +66,9 @@ def db_state(db: Path) -> tuple[bool, bool]:
                     return con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 except sqlite3.OperationalError:  # 表格不存在 = 建置未完成
                     return 0
-            return (all(count(t) > 0 for t in BASE_TABLES),
-                    count("goods_receipt") > 0)
+            cols = {r[1] for r in con.execute("PRAGMA table_info(material_master)")}
+            base = MATERIAL_COLUMN in cols and all(count(t) > 0 for t in BASE_TABLES)
+            return base, base and count("goods_receipt") > 0
     except sqlite3.DatabaseError:
         return False, False
 

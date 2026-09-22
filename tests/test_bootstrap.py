@@ -39,8 +39,10 @@ class Fakes:
     def gen_data(self) -> None:
         self.calls["data"] += 1
         (self.root / "data" / "inbox").mkdir(parents=True, exist_ok=True)
-        for name in ("po_master.csv", "materials.csv", "suppliers.csv"):
+        for name in ("po_master.csv", "suppliers.csv"):
             (self.root / "data" / name).write_text("x\n1\n", encoding="utf-8")
+        (self.root / "data" / "materials.csv").write_text(
+            "material_id,gr_processing_days\nM1,1\n", encoding="utf-8")
         (self.root / "data" / "inbox" / "_index.json").write_text("[1]", encoding="utf-8")
 
     def build_db(self) -> None:
@@ -48,12 +50,14 @@ class Fakes:
         self.db.unlink(missing_ok=True)
         with closing(sqlite3.connect(self.db)) as con:
             for t in TABLES:
-                con.execute(f"CREATE TABLE {t} (x INTEGER)")
+                extra = ", gr_processing_days INTEGER" if t == "material_master" else ""
+                con.execute(f"CREATE TABLE {t} (x INTEGER{extra})")
             con.commit()  # 此刻檔案與表格都已存在，但還沒有任何資料
             time.sleep(self.build_delay)
             if self.build_inserts:
                 for t in TABLES[:-1]:
-                    con.execute(f"INSERT INTO {t} VALUES (1)")
+                    vals = "(1, 1)" if t == "material_master" else "(1)"
+                    con.execute(f"INSERT INTO {t} VALUES {vals}")
                 con.commit()
 
     def gen_history(self) -> None:
@@ -146,3 +150,25 @@ def test_build_that_leaves_database_incomplete_fails_loudly(tmp_path):
     f = Fakes(tmp_path, build_inserts=False)
     with pytest.raises(RuntimeError, match="不完整"):
         f.run()
+
+
+def test_old_format_data_is_rebuilt_not_silently_used(tmp_path):
+    """
+    回歸：料號主檔加入收貨處理天數之前的舊資料，曾經被「補 0 天」後繼續使用，
+    畫面還把 0 天寫成「料別預設」。舊格式必須判定為未備妥並整批重建。
+    """
+    f = Fakes(tmp_path)
+    f.run()
+    (tmp_path / "data" / "materials.csv").write_text("material_id\nM1\n", encoding="utf-8")
+    with closing(sqlite3.connect(f.db)) as con:
+        con.execute("DROP TABLE material_master")
+        con.execute("CREATE TABLE material_master (x INTEGER)")
+        con.execute("INSERT INTO material_master VALUES (1)")
+        con.commit()
+    assert _state(f) == (False, False)
+    f.calls.update(data=0, db=0, history=0)
+
+    f.run()
+
+    assert f.calls == {"data": 1, "db": 1, "history": 1}
+    assert _state(f) == (True, True)
