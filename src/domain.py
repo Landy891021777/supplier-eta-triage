@@ -3,7 +3,7 @@
 領域常數與型別定義。
 
 本檔集中定義「這個工具眼中的世界」——料號類別、供應商類型、承諾強度、
-變更原因。之所以獨立成檔，是因為這些是跟採購/生管同仁溝通時的共同語言，
+變更原因。之所以獨立成檔，是因為這些是跟採購與物料企劃同仁溝通時的共同語言，
 未來要增修時應該只動這一個地方。
 """
 from __future__ import annotations
@@ -14,23 +14,53 @@ from enum import Enum
 
 class MaterialCategory(str, Enum):
     """
-    Fabless 情境下的委外料件類別。
+    晶圓廠（前段製造）的生產用料類別。
 
-    本專案範圍鎖定 WAFER 段（晶圓代工），因為那是我實際待過、
-    特徵判斷最有把握的環節。SUBSTRATE / ASSEMBLY 已預留欄位與介面，
-    但未實作對應的專屬規則——理由詳見 docs/設計決策.md。
+    範圍是物料企劃追的「生產用料」，不含備品（MRO）：備品屬設備工程的補料邏輯，
+    追料方式和生產用料不同。
     """
-    WAFER = "WAFER"            # 晶圓代工投片
-    MASK = "MASK"              # 光罩
-    SUBSTRATE = "SUBSTRATE"    # 載板（預留）
-    ASSEMBLY = "ASSEMBLY"      # 封裝（預留）
+    SILICON_WAFER = "SILICON_WAFER"    # 矽晶圓原片（拋光片、磊晶片）
+    PHOTORESIST = "PHOTORESIST"        # 光阻
+    SPECIALTY_GAS = "SPECIALTY_GAS"    # 特殊氣體
+    WET_CHEMICAL = "WET_CHEMICAL"      # 濕式化學品
+    TARGET = "TARGET"                  # 濺鍍靶材
+    MASK = "MASK"                      # 光罩
+    CMP_SLURRY = "CMP_SLURRY"          # 研磨液
 
 
 class SupplierType(str, Enum):
-    FOUNDRY = "FOUNDRY"
+    WAFER_MAKER = "WAFER_MAKER"
+    RESIST_MAKER = "RESIST_MAKER"
+    GAS_SUPPLIER = "GAS_SUPPLIER"
+    CHEMICAL_SUPPLIER = "CHEMICAL_SUPPLIER"
+    TARGET_MAKER = "TARGET_MAKER"
     MASK_SHOP = "MASK_SHOP"
-    SUBSTRATE = "SUBSTRATE"
-    OSAT = "OSAT"
+    SLURRY_MAKER = "SLURRY_MAKER"
+
+
+# 領域假設：一個料別只向一種供應商類型採購 —— 光阻不會去跟氣體廠買。
+# 產生資料、建模擬 ERP 的來源清單都用這張表，避免兩邊各寫一份而對不上。
+CATEGORY_SUPPLIER_TYPE = {
+    MaterialCategory.SILICON_WAFER.value: SupplierType.WAFER_MAKER.value,
+    MaterialCategory.PHOTORESIST.value: SupplierType.RESIST_MAKER.value,
+    MaterialCategory.SPECIALTY_GAS.value: SupplierType.GAS_SUPPLIER.value,
+    MaterialCategory.WET_CHEMICAL.value: SupplierType.CHEMICAL_SUPPLIER.value,
+    MaterialCategory.TARGET.value: SupplierType.TARGET_MAKER.value,
+    MaterialCategory.MASK.value: SupplierType.MASK_SHOP.value,
+    MaterialCategory.CMP_SLURRY.value: SupplierType.SLURRY_MAKER.value,
+}
+
+# 畫面與知識卡用中文顯示；企劃問「光阻廠準不準」時，檢索才對得到字。
+CATEGORY_LABEL_ZH = {
+    "SILICON_WAFER": "矽晶圓", "PHOTORESIST": "光阻", "SPECIALTY_GAS": "特殊氣體",
+    "WET_CHEMICAL": "濕式化學品", "TARGET": "靶材", "MASK": "光罩",
+    "CMP_SLURRY": "研磨液",
+}
+SUPPLIER_TYPE_LABEL_ZH = {
+    "WAFER_MAKER": "矽晶圓廠", "RESIST_MAKER": "光阻廠", "GAS_SUPPLIER": "特殊氣體廠",
+    "CHEMICAL_SUPPLIER": "化學品廠", "TARGET_MAKER": "靶材廠", "MASK_SHOP": "光罩廠",
+    "SLURRY_MAKER": "研磨液廠",
+}
 
 
 class CommitmentStrength(str, Enum):
@@ -64,7 +94,7 @@ class ChangeType(str, Enum):
 #   - 上游缺料：要往上追第二層供應商
 REASON_CODES = {
     "capacity": "產能排擠 / loading 滿載",
-    "yield": "良率或製程異常",
+    "yield": "製程或品質異常",
     "upstream_shortage": "上游原材料短缺",
     "logistics": "運輸 / 通關延誤",
     "customer_priority": "其他客戶插單優先",
