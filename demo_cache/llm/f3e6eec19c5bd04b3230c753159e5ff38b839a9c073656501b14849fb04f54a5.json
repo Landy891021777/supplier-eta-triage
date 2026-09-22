@@ -1,1 +1,0 @@
-{"text": "{\n  \"records\": [\n    {\n      \"po_no\": \"PO-2026-05083\",\n      \"new_eta\": \"2026-10-31\",\n      \"raw_date_text\": \"下個月底\",\n      \"commitment_strength\": \"intent_only\",\n      \"change_type\": \"delay\",\n      \"reason_code\": \"capacity\",\n      \"confidence\": 0.6,\n      \"notes\": \"供應商表示因廠房產能受限，延至下個月底，但明言日期尚未鎖定，不可視為確定交期\"\n    }\n  ]\n}"}
