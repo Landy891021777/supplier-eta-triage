@@ -55,14 +55,22 @@ def training_slice(outcomes: pd.DataFrame, notice_date) -> pd.DataFrame:
 
 
 def rolling_backtest(outcomes: pd.DataFrame, test_from, test_to=None, *,
-                     min_samples: int = 20, percentiles=PERCENTILES) -> pd.DataFrame:
+                     min_samples: int = 20, percentiles=PERCENTILES,
+                     gr_days_by_category: dict | None = None) -> pd.DataFrame:
     """
     對測試期內每一張改期過的單，用當時已知的歷史算估計，再對照實際結果。
 
     test_to：測試期上緣（含）。不給就不設上限 —— 只有 run() 會傳，因為只有
     它是對著「現在」(as_of) 算，才需要留 TEST_END_LAG_DAYS 的右尾設限；
     單元測試用固定的合成資料，時間軸是假的，不需要這層保護。
+
+    gr_days_by_category：{料別: 收貨處理天數}，不給就全部視為 0
+    （行為與加入收貨處理天數之前完全一樣）。「實際缺料」因此改成
+    「收貨日 + 收貨處理天數 > 需求日」——料到廠不代表能投產，
+    回測若還是只看收貨日，會把光阻、光罩這種到廠後要處理才能用的料
+    看得太樂觀。歷史紀錄沒有企劃的逐料號調整，一律用料別預設。
     """
+    gr_days_by_category = gr_days_by_category or {}
     o = outcomes.copy()
     o["_notice"] = pd.to_datetime(o["notice_date"])
     mask = (o["reschedule_count"] >= 1) & (o["_notice"] >= pd.Timestamp(test_from))
@@ -79,13 +87,15 @@ def rolling_backtest(outcomes: pd.DataFrame, test_from, test_to=None, *,
         mine_train = train[train["supplier_id"] == t["supplier_id"]]
         hist_otd = (float((mine_train["delay_days"] <= 0).mean())
                     if len(mine_train) else float("nan"))
+        gr = int(gr_days_by_category.get(t.get("category"), 0))
         row = {"po_no": t["po_no"], "supplier_id": t["supplier_id"],
                "delay_days": int(t["delay_days"]),
                "committed": pd.Timestamp(t["committed_date"]),
                "need": pd.Timestamp(t["need_date"]),
                "vendor_otd": float(t["vendor_otd"]),
                "hist_otd": hist_otd,
-               "actual_short": bool(pd.Timestamp(t["receipt_date"])
+               "gr_days": gr,
+               "actual_short": bool(pd.Timestamp(t["receipt_date"]) + pd.Timedelta(days=gr)
                                     > pd.Timestamp(t["need_date"]))}
         for p in percentiles:
             est = estimate_delay(train, t["supplier_id"], percentile=p,
@@ -96,7 +106,7 @@ def rolling_backtest(outcomes: pd.DataFrame, test_from, test_to=None, *,
     bt = pd.DataFrame(rows)
     if bt.empty:
         return bt
-    bt["buffer_days"] = (bt["need"] - bt["committed"]).dt.days
+    bt["buffer_days"] = (bt["need"] - bt["committed"]).dt.days - bt["gr_days"]
     # 越大越該排前面（越缺）。一律用 P80：現場工具依承諾強度
     # （confirmed／estimated／intent_only）選 P80／P90／P95，但歷史收貨
     # 紀錄沒有承諾強度這個欄位，回測沒得選，固定用 P80。
@@ -212,10 +222,14 @@ def run(as_of: date | None = None) -> dict:
     # Task 5 才會在 config.yaml 加 triage 區塊；在那之前這裡要能跑，
     # 所以沒有這個區塊就退回跟 estimate_delay 預設值一致的 20。
     min_samples = int(cfg.get("triage", {}).get("min_samples", 20))
+    # 領域假設：歷史沒有企劃的逐料號調整，回測一律用料別預設
+    # （config.yaml 的 receiving.gr_processing_days）。
+    gr_days_by_category = cfg.get("receiving", {}).get("gr_processing_days", {})
     test_to = as_of - timedelta(days=TEST_END_LAG_DAYS)
     test_from = test_to - timedelta(days=30 * TEST_MONTHS)
     outcomes = load_outcomes()
-    bt = rolling_backtest(outcomes, test_from, test_to, min_samples=min_samples)
+    bt = rolling_backtest(outcomes, test_from, test_to, min_samples=min_samples,
+                          gr_days_by_category=gr_days_by_category)
     return {"bt": bt, "test_from": test_from, "test_to": test_to, "as_of": as_of,
             "n_history": len(outcomes)}
 
@@ -267,7 +281,10 @@ def write_report(res: dict, path: Path = OUT) -> str:
   真正晚到的可能還沒收貨、根本還不在歷史庫裡（右尾設限），留在測試期
   會讓涵蓋率看起來比實際好
 - 防偷看：每張測試單只用「它收到改期通知那天以前就已收貨」的單來估計
-- 實際缺料的定義：實際收貨日 > 下游需求日；這批測試單的缺料比例為 **{bt['actual_short'].mean():.1%}**
+- 實際缺料的定義：實際收貨日＋收貨處理天數 > 下游需求日；
+  這批測試單的缺料比例為 **{bt['actual_short'].mean():.1%}**
+- 收貨處理天數用料別預設（config.yaml 的 `receiving.gr_processing_days`）；
+  歷史沒有企劃的逐料號調整
 
 ## 一、保守到料日的涵蓋率
 

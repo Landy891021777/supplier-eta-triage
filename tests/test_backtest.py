@@ -15,11 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import backtest  # noqa: E402
 
 
-def _row(po, sup, delay, resched, committed, receipt, need, notice, otd=0.85):
+def _row(po, sup, delay, resched, committed, receipt, need, notice, otd=0.85,
+        category="TARGET"):
     return {"po_no": po, "supplier_id": sup, "delay_days": delay,
             "reschedule_count": resched, "committed_date": committed,
             "receipt_date": receipt, "need_date": need,
-            "notice_date": notice, "vendor_otd": otd}
+            "notice_date": notice, "vendor_otd": otd, "category": category}
 
 
 def _toy() -> pd.DataFrame:
@@ -168,6 +169,31 @@ def test_baseline_b_uses_history_not_the_static_vendor_master_value():
     # 歷史上 P 準時、Q 常遲，基準 B 該把 Q 排在更前面（gap 更大）；
     # 若誤用靜態的 vendor_otd，順序會整個反過來。
     assert q_gap > p_gap
+
+
+def test_gr_processing_days_affects_actual_short_and_buffer_days():
+    """
+    光阻到廠要 2 天檢驗＋回溫才能投產。receipt = need − 1 表面上沒缺料，
+    但「實際缺料」的定義要看可投產日，不是收貨當天；沒有傳
+    gr_days_by_category 時，行為必須跟現在完全一樣（既有回測不能被悄悄
+    改變），加了之後才會把這張單判成缺料，buffer_days 也要扣掉這幾天。
+    """
+    rows = [_row(f"E{i}", "A", 0, 1, "2026-01-20", "2026-01-20", "2026-02-20",
+                "2026-01-10", category="PHOTORESIST") for i in range(25)]
+    rows.append(_row("T1", "A", 0, 1, "2026-05-01", "2026-05-24", "2026-05-25",
+                     "2026-04-20", category="PHOTORESIST"))
+    df = pd.DataFrame(rows)
+
+    no_gr = backtest.rolling_backtest(df, test_from="2026-04-01", min_samples=20)
+    t1 = no_gr[no_gr["po_no"] == "T1"].iloc[0]
+    assert bool(t1["actual_short"]) is False
+    assert int(t1["buffer_days"]) == 24
+
+    with_gr = backtest.rolling_backtest(df, test_from="2026-04-01", min_samples=20,
+                                        gr_days_by_category={"PHOTORESIST": 2})
+    t1_gr = with_gr[with_gr["po_no"] == "T1"].iloc[0]
+    assert bool(t1_gr["actual_short"]) is True
+    assert int(t1_gr["buffer_days"]) == 22
 
 
 def test_write_report_handles_empty_backtest(tmp_path):
