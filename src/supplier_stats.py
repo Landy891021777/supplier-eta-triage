@@ -127,7 +127,7 @@ def estimate_delay(outcomes: pd.DataFrame, supplier_id: str, *,
     改期單樣本不足 min_samples 時退回全部單，並在 basis 標明；
     全部單也不足就回報樣本不足，不給一個看起來很精確的假數字。
 
-    刻意不再往下切（例如再依料別）：898 張歷史單分給 12 家供應商，
+    刻意不再往下切（例如再依料別）：歷史單分給 14 家供應商，
     每家改期單只有幾十筆，再切每格只剩個位數。
 
     這是歷史統計，不是預測模型。percentile 用 "higher"：取實際出現過的
@@ -212,7 +212,7 @@ if __name__ == "__main__":
     print("\n=== 改期次數 vs 最終是否延遲（驗證『累犯』規則）===")
     print(reschedule_reliability(data).to_string(index=False))
     print("\n=== 保守到料日示例 ===")
-    for sid, promised in [("SUP-F03", "2026-10-29"), ("SUP-S01", "2026-10-14")]:
+    for sid, promised in [("SUP-W03", "2026-10-29"), ("SUP-R02", "2026-10-14")]:
         r = conservative_eta(sid, promised, data)
         if r["available"]:
             print(f"  {sid}  說定 {r['promised']} -> 保守 {r['conservative']}  （{r['note']}）")

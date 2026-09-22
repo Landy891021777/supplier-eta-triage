@@ -65,3 +65,67 @@ def test_never_writes_to_the_erp_database(tmp_path, db):
     ps.set_override(db, "PR-ArF-1088", 4, "全檢", "王小明")
     assert erp.stat().st_mtime_ns == before
     assert db.exists() and db != erp
+
+
+def test_missing_default_in_material_master_is_reported_honestly(db):
+    """
+    I-4：料號主檔沒維護這個欄位（NaN／None）時，回 0 天不能跟「查過、
+    確實是 0 天」講一樣的話——企劃看到「光罩料別預設」會以為系統真的
+    查過光罩的預設值，實際上主檔根本沒有這筆資料。
+    """
+    days, source = ps.effective_gr_days("PR-ArF-1088", float("nan"), "PHOTORESIST", {})
+    assert days == 0
+    assert "未維護" in source
+
+    days2, source2 = ps.effective_gr_days("PR-ArF-1088", None, "PHOTORESIST", {})
+    assert days2 == 0
+    assert "未維護" in source2
+
+
+def test_missing_category_shows_unclassified_not_python_none(db):
+    days, source = ps.effective_gr_days("PR-ArF-1088", 2, None, {})
+    assert days == 2
+    assert "未分類" in source
+    assert "None" not in source
+
+    days2, source2 = ps.effective_gr_days("PR-ArF-1088", 2, float("nan"), {})
+    assert "未分類" in source2
+
+
+def test_days_must_be_a_whole_number(db):
+    """2.9 天被 int() 悄悄截斷成 2 天，企劃完全不會發現天數被改了。"""
+    with pytest.raises(ValueError, match="整數"):
+        ps.set_override(db, "PR-ArF-1088", 2.9, "x", "王小明")
+
+
+def test_days_cannot_be_nan_or_none(db):
+    with pytest.raises(ValueError):
+        ps.set_override(db, "PR-ArF-1088", float("nan"), "x", "王小明")
+    with pytest.raises(ValueError):
+        ps.set_override(db, "PR-ArF-1088", None, "x", "王小明")
+
+
+def test_string_integer_days_are_accepted(db):
+    """允許 "4" 這種可轉整數的字串（表單輸入常見），但不允許 "4.5"。"""
+    ps.set_override(db, "PR-ArF-1088", "4", "全檢", "王小明")
+    days, _ = ps.effective_gr_days("PR-ArF-1088", 2, "PHOTORESIST",
+                                   ps.load_overrides(db))
+    assert days == 4
+    with pytest.raises(ValueError, match="整數"):
+        ps.set_override(db, "PR-ArF-1088", "4.5", "x", "王小明")
+
+
+def test_blank_material_id_is_rejected(db):
+    with pytest.raises(ValueError, match="料號"):
+        ps.set_override(db, "  ", 4, "x", "王小明")
+    with pytest.raises(ValueError, match="料號"):
+        ps.set_override(db, "", 4, "x", "王小明")
+    with pytest.raises(ValueError, match="料號"):
+        ps.clear_override(db, "", "x", "王小明", default_days=2)
+
+
+def test_clear_override_validates_days_the_same_way(db):
+    """clear_override 恢復預設用的 default_days 也要走一樣的嚴格檢查。"""
+    ps.set_override(db, "PR-ArF-1088", 4, "全檢", "王小明")
+    with pytest.raises(ValueError, match="整數"):
+        ps.clear_override(db, "PR-ArF-1088", "恢復預設", "王小明", default_days=2.9)
