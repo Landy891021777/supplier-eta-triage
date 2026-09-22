@@ -26,6 +26,7 @@ import yaml
 
 import extract_llm
 import extract_rules
+import planner_settings
 import triage
 from adapters import get_source
 from domain import ChangeType, CommitmentStrength
@@ -160,6 +161,70 @@ def extract_one(email: dict, cfg: dict, known_pos: list[str],
     return rule_records, trace
 
 
+def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict) -> pd.DataFrame:
+    """
+    只重算分級，不重跑讀信。
+
+    企劃在「收貨處理天數」分頁調完某個料號的天數後，只需要重新跑這支函式
+    就能立刻看到新的優先序——不必、也不該為了一個天數調整再去呼叫 LLM
+    重新解析一次信件（成本與延遲都划不來，何況信件內容根本沒變）。這也是
+    run() 唯一的分級路徑：run() 把抽取與對位的原始欄位寫進 all_df，
+    分級一律交給這支函式，避免兩套邏輯各自演化到對不上。
+
+    gr_days_by_material：{material_id: (天數, 來源說明)}，只放企劃覆寫過的
+    料號。沒被覆寫的料號，用列上原本的 gr_processing_days／category 呼叫
+    planner_settings.effective_gr_days 取得料別預設與說明文字。
+    """
+    if all_df.empty:
+        return all_df
+
+    rows: list[dict] = []
+    for _, series in all_df.iterrows():
+        row = series.to_dict()
+        if not row.get("matched"):
+            # 對不到 PO 主檔的列本來就沒有可以重算的東西，原樣保留。
+            rows.append(row)
+            continue
+
+        material_id = row.get("material_id")
+        override = gr_days_by_material.get(material_id)
+        if override is not None:
+            gr_days, gr_source = override
+        else:
+            gr_days, gr_source = planner_settings.effective_gr_days(
+                material_id, row.get("gr_processing_days"), row.get("category"), {})
+
+        record = {"new_eta": row.get("new_eta"), "change_type": row.get("change_type"),
+                  "commitment_strength": row.get("commitment_strength")}
+        po = {"committed_date": row.get("committed_date"), "need_date": row.get("need_date"),
+              "downstream_scheduled": row.get("downstream_scheduled")}
+        material = {"has_qualified_second_source": row.get("has_second_source"),
+                    "is_bottleneck": row.get("is_bottleneck"),
+                    "alt_material_id": row.get("alt_material_id"),
+                    "gr_processing_days": gr_days, "gr_source": gr_source}
+
+        if row.get("estimate_available"):
+            estimate = {"available": True, "delay_days": row.get("delay_days_est", 0),
+                        "percentile": row.get("delay_percentile"),
+                        "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}
+        elif triage._clean_str(row.get("estimate_reason")):
+            estimate = {"available": False, "n": row.get("delay_n", 0),
+                        "reason": row.get("estimate_reason")}
+        else:
+            estimate = None
+
+        result = triage.evaluate(record, po, material, tcfg, estimate)
+        row.update(gap_days=result["gap_days"], conservative_eta=result["conservative_eta"],
+                   available_date=result["available_date"], priority=result["priority"],
+                   reasons=result["reasons"], actions=result["actions"], note=result["note"],
+                   gr_processing_days=gr_days, gr_source=gr_source)
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+    out = out[out["priority"] != "—"].reset_index(drop=True)
+    return _sort_by_urgency(out)
+
+
 def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
     """執行完整流程，回傳可直接餵給 UI 的結果集。"""
     cfg = cfg or load_config()
@@ -235,7 +300,17 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
             pct = triage.percentile_for(strength, tcfg)
             estimate = estimate_delay(outcomes, po["supplier_id"], percentile=pct,
                                       min_samples=int(tcfg["min_samples"]))
-            result = triage.evaluate(rec, po, material, tcfg, estimate)
+
+            # 收貨處理天數：run() 這裡還沒有企劃的覆寫（覆寫只在使用者按
+            # 「收貨處理天數」分頁的表單時才會有），所以永遠傳空 overrides，
+            # 取到的就是料號主檔＋料別預設。之後 retriage() 用同一支函式，
+            # 分級只有這一套邏輯，不會兩邊各自算一次而對不上。
+            gr_days, gr_source = planner_settings.effective_gr_days(
+                po["material_id"], material.get("gr_processing_days"),
+                material.get("category"), {})
+            material_for_eval = {**material, "gr_processing_days": gr_days,
+                                 "gr_source": gr_source}
+            result = triage.evaluate(rec, po, material_for_eval, tcfg, estimate)
 
             # ---- 人工確認閘門 ----
             gate = set(cfg["extraction"]["require_human_review_when"])
@@ -264,8 +339,16 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
                 "alt_material_id": material.get("alt_material_id", ""),
                 "supplier_name": supplier.get("supplier_name", ""),
                 "supplier_otd": supplier.get("historical_otd_rate", None),
+                "gr_processing_days": gr_days,
+                "gr_source": gr_source,
+                "estimate_available": bool(estimate and estimate.get("available")),
+                "estimate_reason": "" if (estimate and estimate.get("available")) \
+                    else (estimate or {}).get("reason", ""),
+                "delay_percentile": (float(estimate["percentile"])
+                                     if estimate and estimate.get("available") else pct),
                 "gap_days": result["gap_days"],
                 "conservative_eta": result["conservative_eta"],
+                "available_date": result["available_date"],
                 "delay_days_est": result["delay_days_est"],
                 "delay_basis": result["delay_basis"],
                 "delay_n": result["delay_n"],
@@ -289,8 +372,9 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
             .drop_duplicates(subset=["po_no"], keep="last")
             .reset_index(drop=True))
 
-    actionable = df[df["priority"].isin(["P1", "P2", "P3", "待查"])].copy()
-    actionable = _sort_by_urgency(actionable)
+    # 分級交給 retriage()，跟企劃事後調整天數走同一套邏輯（不重覆一份
+    # 過濾＋排序），這裡沒有任何覆寫，結果等同於直接濾掉「—」再排序。
+    actionable = retriage(df, {}, tcfg)
 
     stats = {
         "emails_processed": len(emails),

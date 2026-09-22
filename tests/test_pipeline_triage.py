@@ -59,3 +59,17 @@ def test_unconfirmed_dates_still_need_human_review(result):
     df = result["actions"]
     weak = df["commitment_strength"].isin(["estimated", "intent_only"])
     assert df.loc[weak, "needs_human_review"].all()
+
+
+def test_retriage_on_all_reproduces_actions(result):
+    """
+    retriage() 是唯一的分級路徑：對 result["all"] 重新分級（沒有任何覆寫）
+    必須跟 run() 產生的 actions 一致，否則兩套路徑會各自演化，企劃調完
+    收貨處理天數後看到的分級可能跟首頁對不上。
+    """
+    import pipeline
+    tcfg = pipeline.load_config()["triage"]
+    replay = pipeline.retriage(result["all"], {}, tcfg)
+    left = result["actions"][["po_no", "priority", "gap_days"]].reset_index(drop=True)
+    right = replay[["po_no", "priority", "gap_days"]].reset_index(drop=True)
+    assert left.equals(right)

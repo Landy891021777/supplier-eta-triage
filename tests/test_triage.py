@@ -361,3 +361,38 @@ def test_every_p1_p2_scenario_gets_at_least_one_action(kwargs):
     r = _run(**kwargs)
     assert r["priority"] in ("P1", "P2")
     assert len(r["actions"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 收貨處理天數（可投產日 = 保守到料日 + 收貨處理天數）
+# ---------------------------------------------------------------------------
+def test_gr_processing_days_push_arrival_to_usable_date():
+    """
+    料 10/18 到、需求日 10/20，看似還有 2 天；但光阻到廠要 2 天檢驗＋回溫，
+    10/20 才能投產 → 沒有緩衝。不算收貨處理時間會把這張單看得太樂觀。
+    """
+    r = _run(new_eta="2026-10-18", est=_est(0),
+             mat={"gr_processing_days": 2, "gr_source": "光阻料別預設",
+                  "has_qualified_second_source": False})
+    assert r["gap_days"] == 0 and r["available_date"] == "2026-10-20"
+    assert r["priority"] == "P2"   # 單一來源且沒有緩衝
+    assert any("收貨處理 2 天" in s and "光阻料別預設" in s for s in r["reasons"])
+
+
+def test_zero_gr_days_adds_no_reason_line():
+    r = _run(est=_est(0), mat={"gr_processing_days": 0, "gr_source": "x"})
+    assert not any("收貨處理" in s for s in r["reasons"])
+
+
+def test_shortage_within_gr_days_suggests_expedited_inspection():
+    """缺的天數在收貨處理天數以內 → 請 IQC 優先檢驗就能趕上，這是企劃救得回來的動作。"""
+    r = _run(new_eta="2026-10-19", est=_est(0),
+             mat={"gr_processing_days": 3, "gr_source": "光罩料別預設"})
+    assert r["gap_days"] == 2
+    assert any("IQC" in a and "優先" in a for a in r["actions"])
+
+
+def test_shortage_beyond_gr_days_does_not_suggest_iqc():
+    r = _run(new_eta="2026-10-30", est=_est(0),
+             mat={"gr_processing_days": 1, "gr_source": "x"})
+    assert not any("IQC" in a for a in r["actions"])

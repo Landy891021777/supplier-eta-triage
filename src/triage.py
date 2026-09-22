@@ -9,8 +9,10 @@
 
 這一版只問物料企劃真正在意的一件事：這張單到料時，需求日已經過了幾天？
 
-    預估缺料天數 = 保守到料日 − 下游需求日
+    預估缺料天數 = 保守到料日 + 收貨處理天數 − 下游需求日
     保守到料日   = 供應商說的日期 + 這家供應商過去「說定後仍延遲」的天數
+    收貨處理天數 = 料到廠後、進料檢驗等到可以投產還要幾天
+                  （仿 SAP 料號主檔 MARC-WEBAZ，見 src/planner_settings.py）
 
 那是兩個日期相減，可以在會議上逐項驗算，不是分數。
 分級只用「有沒有缺料」與三個事實旗標，沒有任何可調權重。
@@ -141,7 +143,7 @@ def _tier(gap: int, po: dict, material: dict, tight_days: int) -> str:
 
 
 def suggest_actions(priority: str, gap: int, record: dict, po: dict,
-                    material: dict) -> list[str]:
+                    material: dict, gr_days: int = 0) -> list[str]:
     """
     給物料企劃「自己能做」的下一步。
 
@@ -149,9 +151,11 @@ def suggest_actions(priority: str, gap: int, record: dict, po: dict,
     「與採購確認」「請品保確認」，不寫成企劃自己去做。
     成本與可行性資料庫裡沒有，因此不寫。
 
-    順序：追日期、通知生管是企劃今天就能做的事，排最前面；催貨手段與
-    轉單評估要先跟採購對過才能開口，排後面。只要分級是 P1／P2，一定
-    至少有一個動作——企劃不該看到「有風險卻沒事可做」的單。
+    順序：追日期、通知生管是企劃今天就能做的事，排最前面；缺的天數如果在
+    收貨處理天數以內，請 IQC 優先安排進料檢驗就趕得上，這是企劃自己救得回
+    來的動作，排在通知生管之後、催貨等要跟採購對過才能開口的手段之前。
+    只要分級是 P1／P2，一定至少有一個動作——企劃不該看到「有風險卻沒事
+    可做」的單。
     """
     if priority not in ("P1", "P2"):
         return []
@@ -163,6 +167,9 @@ def suggest_actions(priority: str, gap: int, record: dict, po: dict,
         acts.append(f"先向供應商追一個可承諾的確切日期{why}")
     if _flag(po.get("downstream_scheduled")):
         acts.append("通知生管：這張單可能缺料，需確認下游排程")
+    if 0 < gap <= gr_days:
+        acts.append(f"請品保（IQC）優先安排進料檢驗：收貨處理 {gr_days} 天若能縮短 "
+                    f"{gap} 天就趕得上")
     if gap > 0:
         acts.append("可評估的手段：催貨、拉貨、分批交、空運"
                     "（成本與可行性需與採購、供應商確認）")
@@ -191,8 +198,9 @@ def evaluate(record: dict, po: dict, material: dict, triage_cfg: dict,
     選好百分位後傳入），本函式不讀資料庫，方便單獨測試。
     """
     change = record.get("change_type")
-    out = {"gap_days": None, "conservative_eta": None, "delay_days_est": 0,
-           "delay_basis": "", "delay_n": 0, "actions": [], "note": ""}
+    out = {"gap_days": None, "conservative_eta": None, "available_date": None,
+           "delay_days_est": 0, "delay_basis": "", "delay_n": 0, "actions": [],
+           "note": ""}
 
     if change == ChangeType.NO_CHANGE.value:
         # 確認不變的信不進行動清單，但要留下紀錄（證明這封信已被處理過）。
@@ -231,7 +239,14 @@ def evaluate(record: dict, po: dict, material: dict, triage_cfg: dict,
     available = bool(estimate and estimate.get("available"))
     delay = int(estimate["delay_days"]) if available else 0
     conservative = eta + timedelta(days=delay)
-    gap = (conservative - need).days
+
+    # 收貨處理天數（≈ SAP MARC-WEBAZ）：料到廠不代表能投產，還要幾天檢驗、
+    # 入庫，光阻甚至要回溫一晚。_missing 防的是 NaN——料號主檔沒維護這個
+    # 欄位時，視為當天可用，不是讓 int() 直接炸掉。
+    gr_raw = material.get("gr_processing_days")
+    gr = 0 if _missing(gr_raw) else int(gr_raw)
+    usable = conservative + timedelta(days=gr)
+    gap = (usable - need).days
 
     reasons: list[str] = []
     if available:
@@ -251,22 +266,41 @@ def evaluate(record: dict, po: dict, material: dict, triage_cfg: dict,
                       else f"原承諾日 {eta.isoformat()}")
         reasons.append(f"{why}；暫以{basis_date}計算")
 
+    if gr > 0:
+        reasons.append(f"加上收貨處理 {gr} 天（{material.get('gr_source') or '料號主檔'}），"
+                        f"可投產日 {usable.isoformat()}")
+
     if pull_in_late:
         reasons.append(f"供應商已提前到 {eta.isoformat()}，但仍晚於下游需求日")
 
     if gap > 0:
-        reasons.append(f"比下游需求日 {need.isoformat()} 晚 {gap} 天，預估缺料")
+        if gr > 0:
+            reasons.append(f"可投產日比下游需求日 {need.isoformat()} 晚 {gap} 天，預估缺料")
+        else:
+            reasons.append(f"比下游需求日 {need.isoformat()} 晚 {gap} 天，預估缺料")
     elif gap == 0:
-        # 剛好同一天到，沒有緩衝可言，還沒算進料檢驗要花的時間。
-        reasons.append("與下游需求日同一天到，沒有緩衝（未含進料檢驗時間）")
+        # 剛好同一天到，沒有緩衝可言。gr > 0 時「可投產日」已經含進料檢驗，
+        # gr == 0 時還沒算進料檢驗要花的時間，兩種措辭不能混用。
+        if gr > 0:
+            reasons.append("可投產日與下游需求日同一天，沒有緩衝")
+        else:
+            reasons.append("與下游需求日同一天到，沒有緩衝（未含進料檢驗時間）")
     elif has_new:
-        reasons.append(f"距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝")
+        if gr > 0:
+            reasons.append(f"以可投產日計，距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝")
+        else:
+            reasons.append(f"距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝")
     else:
         # 沒有新日期時這個緩衝是拿原承諾日算出來的，不是供應商剛說的話，
         # 不能讓企劃誤以為真的還有這麼多餘裕。
-        reasons.append(
-            f"距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝"
-            "（以原承諾日計，新日期未知，不能當真）")
+        if gr > 0:
+            reasons.append(
+                f"以可投產日計，距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝"
+                "（以原承諾日計，新日期未知，不能當真）")
+        else:
+            reasons.append(
+                f"距下游需求日 {need.isoformat()} 尚有 {-gap} 天緩衝"
+                "（以原承諾日計，新日期未知，不能當真）")
 
     if gap > 0 and _flag(po.get("downstream_scheduled")):
         reasons.append("下游已排定產能或已對客戶承諾，缺料會連動整串排程")
@@ -290,8 +324,9 @@ def evaluate(record: dict, po: dict, material: dict, triage_cfg: dict,
 
     return {**out, "priority": priority, "gap_days": gap,
             "conservative_eta": conservative.isoformat(),
+            "available_date": usable.isoformat(),
             "delay_days_est": delay,
             "delay_basis": estimate["basis"] if available else "",
             "delay_n": int(estimate["n"]) if available else 0,
             "reasons": reasons,
-            "actions": suggest_actions(priority, gap, record, po, material)}
+            "actions": suggest_actions(priority, gap, record, po, material, gr)}
