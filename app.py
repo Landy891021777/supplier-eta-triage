@@ -186,8 +186,8 @@ def main() -> None:
                                 "因此寫回 ERP 必須由人確認後執行。")
                         if row["actions"]:
                             st.markdown("**建議動作**")
-                            for a in row["actions"]:
-                                st.markdown(f"- {a}")
+                            for act in row["actions"]:
+                                st.markdown(f"- {act}")
                     with b:
                         st.markdown("**原始信件**")
                         st.caption(f"{row['email_id']}｜{row['subject']}")
@@ -207,8 +207,11 @@ def main() -> None:
 
             st.download_button(
                 "⬇️ 匯出行動清單 CSV",
-                view.assign(reasons=view["reasons"].map("；".join),
-                            actions=view["actions"].map("；".join))
+                view.assign(
+                    reasons=view["reasons"].map(
+                        lambda v: "；".join(v) if isinstance(v, list) else ""),
+                    actions=view["actions"].map(
+                        lambda v: "；".join(v) if isinstance(v, list) else ""))
                     .to_csv(index=False).encode("utf-8-sig"),
                 file_name="行動清單.csv", mime="text/csv")
 
@@ -490,11 +493,15 @@ def _reschedule_reliability():
 
 
 def _fmt_gap(gap) -> str:
-    """預估缺料天數的人話：缺 N 天／尚有 N 天緩衝。"""
+    """預估缺料天數的人話：缺 N 天／沒有緩衝／尚有 N 天緩衝。"""
     if gap is None or gap != gap:
         return "無法估計"
     g = int(gap)
-    return f"預估缺料 {g} 天" if g > 0 else f"尚有 {-g} 天緩衝"
+    if g > 0:
+        return f"預估缺料 {g} 天"
+    if g == 0:
+        return "沒有緩衝"
+    return f"尚有 {-g} 天緩衝"
 
 
 if __name__ == "__main__":

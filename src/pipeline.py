@@ -101,6 +101,21 @@ def _sort_by_urgency(df: pd.DataFrame) -> pd.DataFrame:
               .drop(columns="_rank").reset_index(drop=True))
 
 
+def _strength_for_percentile(rec: dict) -> str | None:
+    """
+    決定要用哪個百分位的承諾強度依據。
+
+    只看「new_eta 是否解析得出有效日期」，不是只看欄位有沒有值 ——
+    解析失敗的髒日期（例如 LLM 抽到 "2026-13-45" 這種不存在的日期）
+    跟完全沒給日期一樣不可靠，都該走 triage 裡最保守的 "none" 百分位，
+    不能因為欄位有字串內容就誤判成真的有一個可用的承諾日期。
+    用 triage._d 而不是自己重寫一次日期解析，是因為 triage.evaluate
+    最終也是用它判斷有沒有新日期，兩處標準不一致才是真正的風險。
+    """
+    has_date = triage._d(rec.get("new_eta")) is not None
+    return rec.get("commitment_strength") if has_date else "none"
+
+
 # ---------------------------------------------------------------------------
 def extract_one(email: dict, cfg: dict, known_pos: list[str],
                 provider=None, use_llm: bool = True) -> tuple[list[dict], dict]:
@@ -214,9 +229,9 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
                 except ValueError:
                     pass
 
-            # 信裡沒給新日期時，不論模型把承諾強度判成什麼，都取最保守的百分位。
-            strength = (rec.get("commitment_strength") if rec.get("new_eta")
-                        else "none")
+            # 信裡沒給新日期（或給的日期解析不出來）時，不論模型把承諾強度
+            # 判成什麼，都取最保守的百分位。
+            strength = _strength_for_percentile(rec)
             pct = triage.percentile_for(strength, tcfg)
             estimate = estimate_delay(outcomes, po["supplier_id"], percentile=pct,
                                       min_samples=int(tcfg["min_samples"]))
