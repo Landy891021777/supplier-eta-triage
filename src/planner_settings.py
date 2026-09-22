@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-物料企劃在工具內調整「收貨處理天數」的存取層。
+物料企劃在工具內調整「收貨處理天數」與「確認交期」的存取層。
 
 ===========================  為什麼不寫回 ERP  ===========================
 收貨處理天數在 SAP 是料號主檔的欄位（MARC-WEBAZ），實務上改主檔要走核准流程。
@@ -12,13 +12,25 @@ data/planner_settings.db，畫面上標明「工具內設定，尚未同步 ERP 
 
 限制：雲端展示環境的檔案不持久，App 休眠或重新部署後會回到預設；
 真正上線時應改存公司資料庫。
+
+===========================  企劃確認交期  ===========================
+非 confirmed 的交期一律不寫回系統（人工確認閘門，見 pipeline.py）。
+企劃向供應商要到確切日期後，把「確認後的日期、備註、姓名」登錄在這裡，
+跟收貨處理天數一樣存在工具自己的資料庫，一樣不寫回 ERP：畫面上要標明
+「尚未寫回 ERP，請依公司流程更新交貨排程行」。
+
+它記錄的是「企劃向供應商要到的確切日期，是誰、何時、怎麼確認的」——
+這是 ERP 結構上本來就不會有的資料。只 INSERT、不覆寫，保留每一次確認
+的完整歷史；套用時只取每張單最新一筆（confirm_id 最大），而且要跟
+email_id 對得上（見 pipeline.retriage() 的說明：供應商之後又來新信，
+不能讓一個已經作廢的舊確認蓋掉新資訊）。
 =========================================================================
 """
 from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from domain import CATEGORY_LABEL_ZH
@@ -35,6 +47,10 @@ CREATE TABLE IF NOT EXISTS gr_override_log (
     log_id INTEGER PRIMARY KEY AUTOINCREMENT, material_id TEXT NOT NULL,
     old_days INTEGER, new_days INTEGER NOT NULL, reason TEXT NOT NULL,
     changed_by TEXT NOT NULL, changed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS eta_confirmation (
+    confirm_id INTEGER PRIMARY KEY AUTOINCREMENT, po_no TEXT NOT NULL,
+    email_id TEXT NOT NULL, confirmed_date TEXT NOT NULL, note TEXT,
+    confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);
 """
 
 
@@ -126,6 +142,64 @@ def change_log(db: Path | str | None = None) -> list[dict]:
     with closing(_connect(db)) as con:
         return [dict(r) for r in con.execute(
             "SELECT * FROM gr_override_log ORDER BY log_id")]
+
+
+def _validate_confirmation(po_no, email_id, confirmed_date, note, user
+                           ) -> tuple[str, str, str, str, str]:
+    if not str(po_no or "").strip():
+        raise ValueError("請填寫採購單號")
+    if not str(email_id or "").strip():
+        raise ValueError("請填寫信件編號")
+    d = str(confirmed_date or "").strip()
+    if not d:
+        raise ValueError("請填寫確認後的交期日期（YYYY-MM-DD）")
+    try:
+        date.fromisoformat(d)
+    except ValueError:
+        raise ValueError("請填寫確認後的交期日期（YYYY-MM-DD）") from None
+    if not str(user or "").strip():
+        raise ValueError("請填寫姓名")
+    return po_no.strip(), email_id.strip(), d, str(note or "").strip(), user.strip()
+
+
+def confirm_eta(db, po_no: str, email_id: str, confirmed_date: str, note: str, user: str, *,
+                now: str | None = None) -> None:
+    """
+    登錄企劃向供應商確認到的交期。
+
+    只 INSERT、不 UPDATE：跟 set_override 不同，這裡刻意不做「同一張單
+    覆寫舊確認」，因為確認紀錄本身就是稽核用的歷史（誰、何時、改口過
+    幾次），load_confirmations() 才是取「目前生效的最新一筆」的地方。
+
+    email_id 必須跟著存：套用時要求 email_id 對得上目前這封信，
+    否則供應商隔天又來一封改口的新信，舊確認會誤蓋掉新資訊
+    （見 pipeline.retriage()）。
+    """
+    po_no, email_id, confirmed_date, note, user = _validate_confirmation(
+        po_no, email_id, confirmed_date, note, user)
+    ts = _now(now)
+    with closing(_connect(db)) as con:
+        con.execute(
+            "INSERT INTO eta_confirmation (po_no, email_id, confirmed_date, note,"
+            " confirmed_by, confirmed_at) VALUES (?,?,?,?,?,?)",
+            (po_no, email_id, confirmed_date, note, user, ts))
+        con.commit()
+
+
+def load_confirmations(db: Path | str | None = None) -> dict[str, dict]:
+    """每張單只取最新一筆確認（confirm_id 最大）。"""
+    with closing(_connect(db)) as con:
+        rows = con.execute(
+            "SELECT * FROM eta_confirmation WHERE confirm_id IN "
+            "(SELECT MAX(confirm_id) FROM eta_confirmation GROUP BY po_no)").fetchall()
+        return {r["po_no"]: dict(r) for r in rows}
+
+
+def confirmation_log(db: Path | str | None = None) -> list[dict]:
+    """完整確認歷史，依時間先後排序，給畫面上「這張單改口過幾次」用。"""
+    with closing(_connect(db)) as con:
+        return [dict(r) for r in con.execute(
+            "SELECT * FROM eta_confirmation ORDER BY confirm_id")]
 
 
 def _category_label(category) -> str:

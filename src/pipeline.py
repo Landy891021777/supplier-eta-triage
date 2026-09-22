@@ -117,6 +117,116 @@ def _strength_for_percentile(rec: dict) -> str | None:
     return rec.get("commitment_strength") if has_date else "none"
 
 
+def _derive_change_type(new_eta: str | None, committed_date, current: str | None) -> str:
+    """
+    依新日期與原承諾日重新判定變更類型（delay／pull_in／no_change）。
+
+    run() 解析信件之後、retriage() 套用企劃確認交期之後，都要重判一次
+    change_type——兩個來源（供應商信件、企劃人工確認）都可能給出早於、
+    晚於、或等於原承諾日的日期，判斷規則沒有理由分成兩套，抽成共用
+    函式才不會有一天兩邊各自改壞而對不上（見 retriage() 的說明）。
+
+    只有「目前不是 no_change 而且有新日期」才需要重判：供應商已經明講
+    「確認不變」，不該因為日期字串剛好能解析就被誤判成別的類型；
+    完全沒有新日期、或新日期解析不出來，維持原本的 change_type，
+    不能瞎猜一個新的出來。
+    """
+    if current == ChangeType.NO_CHANGE.value or not new_eta:
+        return current
+    try:
+        new_eta_d = date.fromisoformat(str(new_eta)[:10])
+        committed_d = date.fromisoformat(str(committed_date)[:10])
+    except (ValueError, TypeError):
+        return current
+    if new_eta_d < committed_d:
+        return ChangeType.PULL_IN.value
+    if new_eta_d > committed_d:
+        return ChangeType.DELAY.value
+    return ChangeType.NO_CHANGE.value
+
+
+# 百分位到 run() 存好的欄名對應，鍵跟 triage.percentile_for() 一致
+# （沒對到的承諾強度，包含 "none"，一律走最保守的 p95）。
+_PERCENTILE_COLUMNS = {"confirmed": "delay_days_p80", "estimated": "delay_days_p90"}
+
+
+def _percentile_column(strength: str | None) -> str:
+    return _PERCENTILE_COLUMNS.get(strength or "", "delay_days_p95")
+
+
+def _delay_estimates(outcomes: pd.DataFrame, supplier_id: str, tcfg: dict) -> dict[str, dict]:
+    """
+    對 confirmed／estimated／intent_only 三個百分位各算一次延遲估計。
+
+    retriage() 手上沒有歷史收貨資料，沒辦法重算估計——企劃調完收貨
+    處理天數或登錄確認交期時，只想立刻看到新的分級，不該（也不能）
+    為此重新掃一次歷史資料庫。所以 run() 一次把三個百分位都存進
+    every matched 列（delay_days_p80/p90/p95），retriage() 之後只要
+    依承諾強度挑對應欄，不用重算。
+    """
+    min_samples = int(tcfg["min_samples"])
+    return {strength: estimate_delay(outcomes, supplier_id,
+                                     percentile=triage.percentile_for(strength, tcfg),
+                                     min_samples=min_samples)
+            for strength in ("confirmed", "estimated", "intent_only")}
+
+
+def _pct_delay_days(estimate: dict) -> float:
+    """三個百分位欄位的值：有估計就是天數，樣本不足就是 NaN（不是 0）。"""
+    return float(estimate["delay_days"]) if estimate.get("available") else float("nan")
+
+
+def _select_estimate(row: dict, strength: str, tcfg: dict) -> dict | None:
+    """
+    retriage() 依承諾強度，從 run() 存好的 delay_days_p80/p90/p95 挑一欄。
+
+    欄位不存在（舊格式的 all_df，或測試自己組的資料，例如
+    tests/test_retriage.py）：退回 Task 1 之前的邏輯——用單一欄位
+    delay_days_est／estimate_available，必要時從 delay_n 反推有沒有
+    估計，行為與之前完全相同。
+
+    欄位存在但是 NaN：代表 run() 當初對這個百分位就判斷「樣本不足」，
+    不能因為 delay_days_est 剛好有值就當作有估計去套——那個值是另一個
+    百分位（row 原本的承諾強度）算出來的，套在這裡是錯的估計，比
+    「沒有估計」更危險。只有欄位整個不存在，才退回 delay_days_est。
+    """
+    col = _percentile_column(strength)
+    if col in row:
+        val = row.get(col)
+        if triage._missing(val):
+            return {"available": False, "n": row.get("delay_n", 0),
+                    "reason": row.get("estimate_reason") or "歷史樣本不足，不提供保守估計"}
+        return {"available": True, "delay_days": int(val),
+                "percentile": triage.percentile_for(strength, tcfg),
+                "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}
+
+    if "estimate_available" not in row:
+        # 相容舊格式的 all_df：用 delay_n > 0 反推有沒有估計——有估計
+        # 一定有算過至少一筆歷史樣本，delay_n 才會是正的。百分位優先讀
+        # delay_percentile，沒有（或是 NaN）就照承諾強度現算。
+        n = row.get("delay_n", 0)
+        try:
+            n = int(n) if not triage._missing(n) else 0
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            pct = row.get("delay_percentile")
+            if triage._missing(pct):
+                pct = triage.percentile_for(row.get("commitment_strength"), tcfg)
+            return {"available": True, "delay_days": row.get("delay_days_est", 0),
+                    "percentile": pct, "basis": row.get("delay_basis", ""), "n": n}
+        return {"available": False, "n": n,
+                "reason": row.get("estimate_reason") or "沒有歷史收貨紀錄"}
+    if row.get("estimate_available"):
+        return {"available": True, "delay_days": row.get("delay_days_est", 0),
+                "percentile": row.get("delay_percentile"),
+                "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}
+    if triage._clean_str(row.get("estimate_reason")):
+        return {"available": False, "n": row.get("delay_n", 0),
+                "reason": row.get("estimate_reason")}
+    return None
+
+
 # ---------------------------------------------------------------------------
 def extract_one(email: dict, cfg: dict, known_pos: list[str],
                 provider=None, use_llm: bool = True) -> tuple[list[dict], dict]:
@@ -161,7 +271,8 @@ def extract_one(email: dict, cfg: dict, known_pos: list[str],
     return rule_records, trace
 
 
-def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict) -> pd.DataFrame:
+def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict,
+            confirmations: dict | None = None) -> pd.DataFrame:
     """
     只重算分級，不重跑讀信。
 
@@ -174,17 +285,39 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict) -> pd.
     gr_days_by_material：{material_id: (天數, 來源說明)}，只放企劃覆寫過的
     料號。沒被覆寫的料號，用列上原本的 gr_processing_days／category 呼叫
     planner_settings.effective_gr_days 取得料別預設與說明文字。
+
+    confirmations：planner_settings.load_confirmations() 的回傳值，
+    {po_no: {confirmed_date, email_id, note, confirmed_by, confirmed_at}}。
+    套用的條件是 po_no 對得上**而且 email_id 也對得上**——email_id 對不上
+    代表供應商在企劃確認之後又寄了新信（例如改口延到更晚），這種情況
+    舊確認已經作廢，不能讓它蓋掉新信的內容，寧可讓這張單回到「需人工
+    確認」，也不能顯示一個已經不算數的日期。套用後 new_eta／
+    commitment_strength／change_type 都改用確認後的值（change_type 用
+    跟 run() 相同的 _derive_change_type，兩處判斷同一件事沒有理由用
+    兩套邏輯），needs_human_review 設為 False，並在 reasons 最前面插入
+    一條寫明「誰、哪天確認、尚未寫回 ERP」的說明。
     """
     if all_df.empty:
         return all_df
 
     rows: list[dict] = []
+    confirmations = confirmations or {}
     for _, series in all_df.iterrows():
         row = series.to_dict()
         if not row.get("matched"):
             # 對不到 PO 主檔的列本來就沒有可以重算的東西，原樣保留。
             rows.append(row)
             continue
+
+        po_no = row.get("po_no")
+        confirmation = confirmations.get(po_no)
+        confirmed = bool(confirmation) and confirmation.get("email_id") == row.get("email_id")
+        if confirmed:
+            row["change_type"] = _derive_change_type(
+                confirmation["confirmed_date"], row.get("committed_date"),
+                row.get("change_type"))
+            row["new_eta"] = confirmation["confirmed_date"]
+            row["commitment_strength"] = CommitmentStrength.CONFIRMED.value
 
         material_id = row.get("material_id")
         override = gr_days_by_material.get(material_id)
@@ -203,41 +336,27 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict) -> pd.
                     "alt_material_id": row.get("alt_material_id"),
                     "gr_processing_days": gr_days, "gr_source": gr_source}
 
-        if "estimate_available" not in row:
-            # 相容舊格式的 all_df（例如 Task 7 之前產生、沒有這幾個原始欄位
-            # 的資料）：用 delay_n > 0 反推有沒有估計——有估計一定有算過
-            # 至少一筆歷史樣本，delay_n 才會是正的。百分位優先讀
-            # delay_percentile，沒有（或是 NaN）就照承諾強度現算，
-            # 跟 run() 選百分位的邏輯一致。
-            n = row.get("delay_n", 0)
-            try:
-                n = int(n) if not triage._missing(n) else 0
-            except (TypeError, ValueError):
-                n = 0
-            if n > 0:
-                pct = row.get("delay_percentile")
-                if triage._missing(pct):
-                    pct = triage.percentile_for(row.get("commitment_strength"), tcfg)
-                estimate = {"available": True, "delay_days": row.get("delay_days_est", 0),
-                            "percentile": pct, "basis": row.get("delay_basis", ""), "n": n}
-            else:
-                estimate = {"available": False, "n": n,
-                            "reason": row.get("estimate_reason") or "沒有歷史收貨紀錄"}
-        elif row.get("estimate_available"):
-            estimate = {"available": True, "delay_days": row.get("delay_days_est", 0),
-                        "percentile": row.get("delay_percentile"),
-                        "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}
-        elif triage._clean_str(row.get("estimate_reason")):
-            estimate = {"available": False, "n": row.get("delay_n", 0),
-                        "reason": row.get("estimate_reason")}
-        else:
-            estimate = None
+        strength = _strength_for_percentile(record)
+        estimate = _select_estimate(row, strength, tcfg)
 
         result = triage.evaluate(record, po, material, tcfg, estimate)
+        reasons = result["reasons"]
+        if confirmed:
+            by = confirmation.get("confirmed_by", "")
+            at = confirmation.get("confirmed_at", "")
+            note = confirmation.get("note") or ""
+            note_part = f"（{note}）" if note else ""
+            prefix = (f"企劃 {by} {at[5:10]} 向供應商確認交期 "
+                      f"{confirmation['confirmed_date']}{note_part}；"
+                      "尚未寫回 ERP，請依公司流程更新交貨排程行")
+            reasons = [prefix, *reasons]
+
         row.update(gap_days=result["gap_days"], conservative_eta=result["conservative_eta"],
                    available_date=result["available_date"], priority=result["priority"],
-                   reasons=result["reasons"], actions=result["actions"], note=result["note"],
+                   reasons=reasons, actions=result["actions"], note=result["note"],
                    gr_processing_days=gr_days, gr_source=gr_source)
+        if confirmed:
+            row["needs_human_review"] = False
         rows.append(row)
 
     out = pd.DataFrame(rows)
@@ -265,6 +384,9 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
 
     rows: list[dict] = []
     traces: list[dict] = []
+    # 依供應商快取三個百分位的估計，同一供應商名下多張單不用各自重算一次
+    # （_delay_estimates 每次都要掃一輪 outcomes，供應商名單通常遠比信件少）。
+    estimate_cache: dict[str, dict[str, dict]] = {}
 
     for email in emails:
         # 只把該供應商名下的 PO 帶進 prompt，縮短 prompt 並降低錯配機會。
@@ -301,25 +423,20 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
             supplier = sup_index.get(po["supplier_id"], {})
 
             # ---- 對位之後才判定變更類型（單看信件做不到）----
-            if rec.get("change_type") != ChangeType.NO_CHANGE.value and rec.get("new_eta"):
-                try:
-                    new_eta = date.fromisoformat(rec["new_eta"])
-                    committed = date.fromisoformat(str(po["committed_date"])[:10])
-                    if new_eta < committed:
-                        rec["change_type"] = ChangeType.PULL_IN.value
-                    elif new_eta > committed:
-                        rec["change_type"] = ChangeType.DELAY.value
-                    else:
-                        rec["change_type"] = ChangeType.NO_CHANGE.value
-                except ValueError:
-                    pass
+            rec["change_type"] = _derive_change_type(
+                rec.get("new_eta"), po["committed_date"], rec.get("change_type"))
 
             # 信裡沒給新日期（或給的日期解析不出來）時，不論模型把承諾強度
             # 判成什麼，都取最保守的百分位。
             strength = _strength_for_percentile(rec)
             pct = triage.percentile_for(strength, tcfg)
-            estimate = estimate_delay(outcomes, po["supplier_id"], percentile=pct,
-                                      min_samples=int(tcfg["min_samples"]))
+            supplier_id = po["supplier_id"]
+            if supplier_id not in estimate_cache:
+                estimate_cache[supplier_id] = _delay_estimates(outcomes, supplier_id, tcfg)
+            estimates_by_strength = estimate_cache[supplier_id]
+            # "none"（信裡沒給新日期）沒有對應欄——跟 intent_only 同一個
+            # 百分位（見 triage.percentile_for），拿 intent_only 那組即可。
+            estimate = estimates_by_strength.get(strength, estimates_by_strength["intent_only"])
 
             # 收貨處理天數：run() 這裡還沒有企劃的覆寫（覆寫只在使用者按
             # 「收貨處理天數」分頁的表單時才會有），所以永遠傳空 overrides，
@@ -366,6 +483,13 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
                     else (estimate or {}).get("reason", ""),
                 "delay_percentile": (float(estimate["percentile"])
                                      if estimate and estimate.get("available") else pct),
+                # retriage() 沒有歷史資料，沒辦法重算估計——把三個百分位都
+                # 存起來，retriage() 依它要用的承諾強度挑對應欄
+                # （見 pipeline._select_estimate）。樣本不足時是 NaN，
+                # 不是 0：0 天會被誤讀成「歷史上準時到」。
+                "delay_days_p80": _pct_delay_days(estimates_by_strength["confirmed"]),
+                "delay_days_p90": _pct_delay_days(estimates_by_strength["estimated"]),
+                "delay_days_p95": _pct_delay_days(estimates_by_strength["intent_only"]),
                 "gap_days": result["gap_days"],
                 "conservative_eta": result["conservative_eta"],
                 "available_date": result["available_date"],
