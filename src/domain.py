@@ -97,6 +97,14 @@ class CommitmentStrength(str, Enum):
     NONE = "none"                # 信中未提及新日期
 
 
+# 畫面與匯出用中文顯示；原始值（confirmed/estimated/...）仍是資料與判斷邏輯
+# 的依據，這張表只管顯示，不影響 triage／pipeline 的任何判斷。
+COMMITMENT_LABEL_ZH = {
+    "confirmed": "已確認", "estimated": "暫估",
+    "intent_only": "僅意向", "none": "未給日期",
+}
+
+
 class ChangeType(str, Enum):
     DELAY = "delay"          # 延遲
     PULL_IN = "pull_in"      # 提前（也需要處理：可能要提早備料、提早付款）

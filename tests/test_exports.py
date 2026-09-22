@@ -51,6 +51,16 @@ def test_followup_workbook_writes_integers_and_joined_text():
     assert rows[0][header.index("數量")] == "80 GAL"
 
 
+def test_followup_workbook_shows_commitment_strength_in_chinese():
+    """承諾強度存的是 estimated/confirmed 這種代碼；企劃看報表要看得懂中文，
+    不是工程用的英文代碼。"""
+    wb = load_workbook(io.BytesIO(exports.followup_workbook(_actions(), "2026-09-08")))
+    ws = wb["追料清單"]
+    header = [c.value for c in ws[1]]
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert rows[0][header.index("承諾強度")] == "暫估"
+
+
 def _outcomes():
     rows = []
     for i in range(6):   # 2026-05：6 筆，2 筆延遲

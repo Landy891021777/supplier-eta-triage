@@ -26,7 +26,7 @@ from datetime import datetime
 import pandas as pd
 
 import triage
-from domain import CATEGORY_LABEL_ZH
+from domain import CATEGORY_LABEL_ZH, COMMITMENT_LABEL_ZH
 
 FOLLOWUP_COLUMNS = ["優先級", "預估缺料天數", "採購單號", "料號", "料別", "供應商", "數量",
                     "新交期", "保守到料日", "可投產日", "需求日", "承諾強度", "需人工確認",
@@ -89,6 +89,12 @@ def _category_label(v) -> str:
     return CATEGORY_LABEL_ZH.get(v, v)
 
 
+def _commitment_label(v) -> str:
+    """承諾強度顯示中文；不認得的值（未知格式）原樣顯示，不隱藏異常資料。"""
+    v = triage._clean_str(v)
+    return COMMITMENT_LABEL_ZH.get(v, v)
+
+
 def followup_workbook(actions: pd.DataFrame, as_of: str) -> bytes:
     """
     明日追料清單，給物料企劃明天早上追料、或帶去缺料檢討會用。
@@ -111,7 +117,7 @@ def followup_workbook(actions: pd.DataFrame, as_of: str) -> bytes:
         "保守到料日": _col(df, "conservative_eta").map(triage._clean_str),
         "可投產日": _col(df, "available_date").map(triage._clean_str),
         "需求日": _col(df, "need_date").map(triage._clean_str),
-        "承諾強度": _col(df, "commitment_strength").map(triage._clean_str),
+        "承諾強度": _col(df, "commitment_strength").map(_commitment_label),
         "需人工確認": _col(df, "needs_human_review").map(_yn),
         "建議動作": _col(df, "actions").map(_joined),
         "理由": _col(df, "reasons").map(_joined),
