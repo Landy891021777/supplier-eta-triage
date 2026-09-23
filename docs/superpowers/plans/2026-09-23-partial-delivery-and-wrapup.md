@@ -51,6 +51,13 @@
 
 ### Task 1: 資料層 —— 讓交貨排程行真的有多筆
 
+> **執行後修正（2026-09-23，Task 1–3 已完成）：** 下方 Step 1 第 5 點與 Step 2 要求把
+> `PO-2026-04188` 預先拆成 8／12 寫進 ERP，**這是錯的**：HC-010 是供應商「宣布」拆批，
+> ERP 裡若已經是這兩個日期，信件就變成「沒有變更」。實際做法：`PO-2026-04188` 維持
+> ERP 單一排程行（20 片、2026-09-30）；一封信把同一行拆成多批時，每批各自成列
+> （鍵為 `(po_no, sched_line, batch_key)`），標「供應商提議拆批，ERP 尚未拆行」並需人工確認。
+> 見 commit `b783bf5`。
+
 **Files:** Modify `src/generate_data.py`、`src/build_erp_db.py`、`src/adapters/sqlite_source.py`、`src/adapters/csv_source.py`、`src/adapters/base.py`；Test `tests/test_adapters.py`、`tests/test_world.py`
 
 - [ ] **Step 1: 寫失敗的測試**（`tests/test_adapters.py` 追加，沿用現有在 `tmp_path` 重建新世界的 fixture）：
