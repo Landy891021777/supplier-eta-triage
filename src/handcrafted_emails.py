@@ -241,8 +241,12 @@ HANDCRAFTED: list[dict] = [
         "tags": ["partial_delivery", "split_shipment", "allocation"],
         "ground_truth": [
             # 分批交貨：部分準時、部分延遲。實務上最常見卻最少被工具處理的型態。
-            # 本版以「最晚的那批」為 new_eta 並於 notes 標記分批 —— 屬已知簡化，見 docs/設計決策.md。
-            {"po_no": "PO-2026-04188", "new_eta": "2026-11-15",
+            # 一張單拆成兩筆各自的 record（帶 qty），不再只取「最晚那批」——
+            # 準時的 8 片可以先投料，延遲的 12 片才是真正要追的缺料。
+            {"po_no": "PO-2026-04188", "qty": 8, "new_eta": "2026-09-30",
+             "commitment_strength": "confirmed", "change_type": "no_change",
+             "reason_code": "customer_priority"},
+            {"po_no": "PO-2026-04188", "qty": 12, "new_eta": "2026-11-15",
              "commitment_strength": "confirmed", "change_type": "delay",
              "reason_code": "customer_priority"},
         ],

@@ -141,6 +141,10 @@ class ExtractedRecord:
     confidence: float = 0.0              # 0~1，解析層對自己的信心
     extracted_by: str = "rule"           # rule | llm | none
     notes: str = ""
+    # 分批交貨：同一張 PO 一封信可以抽出多筆 record，用 qty 分開各批。
+    # 沒提到數量（絕大多數信件）就是 None，不強迫湊一個假數字出來。
+    qty: int | None = None
+    batch_note: str = ""                 # 例如「分批交貨的其中一批」；沒有就空字串
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -53,24 +53,40 @@ def _truth_by_email(truth: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def _score_key(rec: dict):
+    """
+    計分用的鍵：(po_no, qty)；qty 為 None 時退回只比 po_no。
+
+    分批交貨的一張單會有兩筆 truth，只用 po_no 沒辦法把兩批分開計分——
+    兩筆會被當成同一個鍵，其中一批的對錯會蓋掉另一批。沒提到數量的信
+    （絕大多數）維持原本只比 po_no 的行為，不然舊案例的分數會無端變動。
+    """
+    po = rec.get("po_no")
+    qty = rec.get("qty")
+    return (po, qty) if qty is not None else po
+
+
 def score_email(pred: list[dict], truth: list[dict]) -> dict:
     """
     對單封信計分。
 
     四個指標刻意分開看，因為它們的失敗代價完全不同：
-      po_hit       PO 抓錯 -> 整筆資訊掛到錯的單上，最嚴重
+      po_hit       信中提到的每一筆交期是否都有對應輸出 -> 漏掉一批，缺料看不到
       eta_exact    日期抓錯 -> 排程算錯
       strength_ok  承諾強度判錯 -> 把託辭當承諾，這是本工具最在意的錯誤型態
       change_ok    變更類型判錯 -> 把「確認不變」當成延遲，清單被雜訊灌爆
+
+    計分鍵改為 (po_no, qty)（見 `_score_key`），才能讓分批交貨的兩批
+    分別計分，而不是被同一個 po_no 蓋成一筆。
     """
-    pt = {t["po_no"] for t in truth}
-    pp = {p["po_no"] for p in pred if p.get("po_no")}
+    pt = {_score_key(t) for t in truth}
+    pp = {_score_key(p) for p in pred if p.get("po_no")}
     po_hit = len(pt & pp) / len(pt) if pt else float("nan")
 
-    tmap = {t["po_no"]: t for t in truth}
+    tmap = {_score_key(t): t for t in truth}
     eta_n = eta_ok = str_n = str_ok = chg_n = chg_ok = false_confirmed = 0
     for p in pred:
-        t = tmap.get(p.get("po_no"))
+        t = tmap.get(_score_key(p))
         if not t:
             continue
         str_n += 1
@@ -158,7 +174,7 @@ def to_markdown(res: dict) -> str:
         "",
         "| 指標 | 意義 | 判錯的代價 |",
         "|---|---|---|",
-        "| `po_hit` | 是否抓到信中提及的所有 PO | 資訊掛到錯的單上，最嚴重 |",
+        "| `po_hit` | 信中提到的每一筆交期是否都有對應輸出（分批交貨算兩筆） | 資訊掛到錯的單上或漏掉一批，最嚴重 |",
         "| `eta_exact` | 新交期日期是否完全正確 | 下游排程算錯 |",
         "| `strength_ok` | 承諾強度是否判對 | **把託辭當成承諾**，本工具最在意的錯誤 |",
         "| `change_ok` | 變更類型是否判對 | 把「確認不變」當延遲，清單被雜訊灌爆 |",

@@ -111,6 +111,103 @@ def test_original_label_does_not_poison_next_line():
     assert extract_rules._nearest_label(text, pos) == "new"
 
 
+# ---------------------------------------------------------------------------
+# 分批交貨：一封信可以講同一張單的多批交期
+# ---------------------------------------------------------------------------
+def test_hc010_split_shipment_yields_two_records():
+    """
+    HC-010：「8 pcs on the original date 2026-09-30, remaining 12 pcs
+    deferred to 2026-11-15」必須拆成兩筆，不能只取最晚那批——
+    只取最晚一筆等於把準時到的 8 片當成不存在，缺料清單會漏看真正的風險。
+    """
+    recs = _extract("HC-010")
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert set(by_qty) == {8, 12}
+
+    on_time = by_qty[8]
+    assert on_time["po_no"] == "PO-2026-04188"
+    assert on_time["new_eta"] == "2026-09-30"
+    assert on_time["change_type"] == ChangeType.NO_CHANGE.value
+
+    delayed = by_qty[12]
+    assert delayed["po_no"] == "PO-2026-04188"
+    assert delayed["new_eta"] == "2026-11-15"
+    assert delayed["change_type"] == ChangeType.DELAY.value
+
+
+def test_split_shipment_generalises_to_different_wording():
+    """
+    規則不可以寫死 HC-010 的句子——換一種說法（不同單位、不同日期格式）
+    也要抓得到兩批，否則只是背答案，遇到真實信件的其他寫法就會失效。
+    """
+    email = {
+        "subject": "Shipment update",
+        "body": ("PO-2026-09999: 1,000 pcs ship on 10/05, the remaining 500 pcs "
+                 "will follow on 10/26."),
+        "supplier_id": "SUP-TEST",
+    }
+    recs = [r.to_dict() for r in extract_rules.extract(email)]
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert set(by_qty) == {1000, 500}
+    assert by_qty[1000]["new_eta"] == "2026-10-05"
+    assert by_qty[1000]["change_type"] == ChangeType.NO_CHANGE.value
+    assert by_qty[500]["new_eta"] == "2026-10-26"
+    assert by_qty[500]["change_type"] == ChangeType.DELAY.value
+
+
+def test_split_shipment_chinese_wording_without_first_batch_date():
+    """
+    中文寫法「先出 X，其餘 Y 延到某日」通常不會重述第一批的日期——
+    這時第一批的 new_eta 應為 null（不可亂猜），但仍要拆成兩筆、各帶 qty。
+    """
+    email = {
+        "subject": "分批出貨通知",
+        "body": "PO-2026-08888 先出 2,000 片，其餘 3,000 片延到 11/15",
+        "supplier_id": "SUP-TEST",
+    }
+    recs = [r.to_dict() for r in extract_rules.extract(email)]
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert by_qty[2000]["new_eta"] is None
+    assert by_qty[2000]["change_type"] == ChangeType.NO_CHANGE.value
+    assert by_qty[3000]["new_eta"] == "2026-11-15"
+    assert by_qty[3000]["change_type"] == ChangeType.DELAY.value
+
+
+def test_non_split_email_still_yields_one_record():
+    """
+    回歸測試：沒有分批的信不可以被誤判成分批，否則好端端一張單會被拆成兩筆。
+    HC-006 是單張單的「確認不變」信，沒有「其餘／remaining」這類轉折詞。
+    """
+    recs = _extract("HC-006")
+    assert len(recs) == 1
+
+
+def test_score_email_scores_split_batches_separately():
+    """
+    分批交貨的兩批要能分別計分：其中一批日期抓對、另一批抓錯，
+    eta_exact 應該是 0.5 而不是被同一個 po_no 蓋成一筆。
+    """
+    import evaluate
+    truth = [
+        {"po_no": "PO-2026-04188", "qty": 8, "new_eta": "2026-09-30",
+         "commitment_strength": "confirmed", "change_type": "no_change"},
+        {"po_no": "PO-2026-04188", "qty": 12, "new_eta": "2026-11-15",
+         "commitment_strength": "confirmed", "change_type": "delay"},
+    ]
+    pred = [
+        {"po_no": "PO-2026-04188", "qty": 8, "new_eta": "2026-09-30",
+         "commitment_strength": "confirmed", "change_type": "no_change"},
+        {"po_no": "PO-2026-04188", "qty": 12, "new_eta": "2026-10-01",  # 日期抓錯
+         "commitment_strength": "estimated", "change_type": "delay"},
+    ]
+    s = evaluate.score_email(pred, truth)
+    assert s["po_hit"] == 1.0, "兩批都有輸出，即使其中一批日期錯，po_hit 仍應為 1"
+    assert s["eta_exact"] == 0.5
+
+
 def test_score_email_counts_false_confirmed_separately():
     """
     把託辭判成「已確認」是本工具最危險的錯，必須單獨算出來。
