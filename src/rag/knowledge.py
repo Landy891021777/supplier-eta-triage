@@ -137,8 +137,20 @@ def material_cards(materials: pd.DataFrame, pos: pd.DataFrame) -> list[Card]:
 
 def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
              suppliers: pd.DataFrame, as_of: date) -> list[Card]:
+    """
+    每一筆交貨排程行一張卡（`pos` 是 purchase_orders()，分批交貨時同一個
+    po_no 會有兩列）。card_id 不能兩批都叫 `PO:{po_no}`——那樣後面那批
+    的卡會在 `HybridRetriever._by_id`（用 card_id 當鍵的字典）裡悄悄蓋掉
+    前一批，前一批的事實就從檢索裡消失了。只有一筆排程行的單維持
+    `PO:{po_no}`（不因為這次改版讓沒有分批的單多一段沒意義的 ID 後綴）；
+    分批的單改成 `PO:{po_no}#{sched_line}`，並在卡片內容裡把「這是第幾批」
+    講清楚，模型跟人都要看得出這張卡只是這張單的其中一批，不是全貌
+    （見 rag/retriever.py 的 pinned()：問句提到單號時，要把同一張單
+    所有批次的卡都釘選出來，不能只釘到其中一張）。
+    """
     mat_idx = materials.set_index("material_id").to_dict("index")
     sup_idx = suppliers.set_index("supplier_id").to_dict("index")
+    line_counts = pos["po_no"].value_counts().to_dict()
     cards = []
     for p in pos.itertuples(index=False):
         m = mat_idx.get(p.material_id, {})
@@ -146,11 +158,16 @@ def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
         committed = date.fromisoformat(str(p.committed_date)[:10])
         need = date.fromisoformat(str(p.need_date)[:10])
         buffer_days = (need - committed).days
+        total_lines = line_counts.get(p.po_no, 1)
+        is_split = total_lines > 1
         lines = [
-            f"採購單號：{p.po_no}",
+            f"採購單號：{p.po_no}"
+            + (f"（分批交貨：第 {int(p.sched_line)} 批／共 {total_lines} 批）"
+               if is_split else ""),
             f"料號：{p.material_id}（{m.get('category', '')}）",
             f"供應商：{p.supplier_id} {s.get('supplier_name', '')}",
-            f"採購數量：{int(p.qty)}",
+            f"項次總量：{int(p.qty)}"
+            + (f"（本批數量：{int(p.sched_qty)}）" if is_split else ""),
             f"供應商承諾交期：{committed.isoformat()}",
             f"下游需求日：{need.isoformat()}",
             f"緩衝天數（需求日減承諾日）：{buffer_days} 天",
@@ -160,9 +177,12 @@ def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
             f"是否有已認證二源：{_yn(m.get('has_qualified_second_source'))}",
             f"是否為瓶頸料：{_yn(m.get('is_bottleneck'))}",
         ]
+        card_id = f"PO:{p.po_no}#{int(p.sched_line)}" if is_split else f"PO:{p.po_no}"
+        title = (f"採購單 {p.po_no}（第 {int(p.sched_line)} 批／共 {total_lines} 批）"
+                if is_split else f"採購單 {p.po_no}")
         cards.append(Card(
-            card_id=f"PO:{p.po_no}", kind="po",
-            title=f"採購單 {p.po_no}", text="\n".join(lines),
+            card_id=card_id, kind="po",
+            title=title, text="\n".join(lines),
             meta={"po_no": p.po_no, "material_id": p.material_id,
                   "supplier_id": p.supplier_id}))
     return cards

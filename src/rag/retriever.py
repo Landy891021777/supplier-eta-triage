@@ -80,6 +80,18 @@ class HybridRetriever:
         # 問句就永遠釘選不到，等同精確 ID 釘選整組失效。
         self._by_id_lower = {cid.lower(): card for cid, card in self._by_id.items()}
 
+        # 分批交貨：一張 PO 可能拆成好幾張卡（PO:{po_no}#{sched_line}，
+        # 見 rag/knowledge.po_cards），card_id 不再是「單號」本身，是
+        # 「單號＋批次」。問句只會提到單號，不會知道也不該管有幾批，
+        # 所以另外照「單號」（card_id 去掉 #批次 的部分）分組，pinned()
+        # 釘選時才能一次把同一張單所有批次的卡都找出來，不會漏掉未拆批
+        # 之外的那幾批。
+        self._po_group: dict[str, list[str]] = {}
+        for c in cards:
+            if c.card_id.startswith("PO:"):
+                base = c.card_id.split("#", 1)[0].lower()
+                self._po_group.setdefault(base, []).append(c.card_id)
+
         # 字元 n-gram：中文不需要斷詞器，單號這種混合字串也能部分比對
         self._tfidf = TfidfVectorizer(analyzer="char", ngram_range=(2, 3),
                                       sublinear_tf=True, min_df=1)
@@ -188,13 +200,23 @@ class HybridRetriever:
         direct: list[str] = []
         related: list[str] = []
         for ident in ids:
-            for prefix in ("PO", "MAT", "SUP"):
+            # PO 用「單號分組」比對，不是單一 card_id 查表：分批交貨的單
+            # 有好幾張卡（PO:{po_no}#{sched_line}），問句提到單號時，
+            # 每一批的卡都要釘選出來，企劃才看得到「這批準時、那批延遲」
+            # 的完整情況，不會只看到其中一批就以為問題不存在。
+            for cid in self._po_group.get(f"PO:{ident}".lower(), []):
+                if cid not in direct:
+                    direct.append(cid)
+            for prefix in ("MAT", "SUP"):
                 card = self._by_id_lower.get(f"{prefix}:{ident}".lower())
                 if card and card.card_id not in direct:
                     direct.append(card.card_id)
-            # 關聯一層：採購單 → 它的料號卡與供應商卡
-            po_card = self._by_id_lower.get(f"PO:{ident}".lower())
-            if po_card:
+            # 關聯一層：採購單 → 它的料號卡與供應商卡（同一張單所有批次
+            # 的料號、供應商都相同，拿分組裡任一張卡的 meta 就夠）。
+            po_cards_for_ident = [self._by_id[cid]
+                                  for cid in self._po_group.get(f"PO:{ident}".lower(), [])]
+            if po_cards_for_ident:
+                po_card = po_cards_for_ident[0]
                 for rel in (f"MAT:{po_card.meta.get('material_id')}",
                             f"SUP:{po_card.meta.get('supplier_id')}"):
                     rel_card = self._by_id_lower.get(rel.lower())

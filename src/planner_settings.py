@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS gr_override_log (
     changed_by TEXT NOT NULL, changed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS eta_confirmation (
     confirm_id INTEGER PRIMARY KEY AUTOINCREMENT, po_no TEXT NOT NULL,
-    email_id TEXT NOT NULL, confirmed_date TEXT NOT NULL, note TEXT,
+    sched_line INTEGER, email_id TEXT NOT NULL, confirmed_date TEXT NOT NULL, note TEXT,
     confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);
 """
 
@@ -60,6 +60,14 @@ def _connect(db: Path | str | None) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(_SCHEMA)
+    # 遷移：Task 3 之前建的 eta_confirmation 表沒有 sched_line 欄——
+    # CREATE TABLE IF NOT EXISTS 不會幫既有的表補欄位，得自己判斷、
+    # 用 ALTER TABLE 補上。舊資料的 sched_line 是 NULL，讀取時一律
+    # 當成第 1 行（見 load_confirmations()），跟「只有一筆排程行的單，
+    # 行為跟改版前完全一樣」這條相容規則一致。
+    cols = {r[1] for r in con.execute("PRAGMA table_info(eta_confirmation)")}
+    if "sched_line" not in cols:
+        con.execute("ALTER TABLE eta_confirmation ADD COLUMN sched_line INTEGER")
     return con
 
 
@@ -165,10 +173,32 @@ def _blank(v) -> bool:
     return not str(v).strip()
 
 
-def _validate_confirmation(po_no, email_id, confirmed_date, note, user
-                           ) -> tuple[str, str, str, str, str]:
+def _to_sched_line(sched_line) -> int:
+    """
+    嚴格檢查批次（排程行）：必須是正整數。
+
+    表單一定知道自己在替哪一批填表（key 裡就帶著 sched_line，見
+    views/actions.py），這裡刻意不偷偷預設成 1——寫入時含糊帶過，
+    以後才是「登錄到底套到哪一批」查不清楚的源頭。NULL／None 只在
+    讀取「Task 3 以前存的舊資料」時才視為第 1 行（見 load_confirmations()）。
+    """
+    try:
+        f = float(sched_line)
+    except (TypeError, ValueError):
+        raise ValueError("批次（排程行）錯誤，請重新整理頁面") from None
+    if f != f:  # NaN
+        raise ValueError("批次（排程行）錯誤，請重新整理頁面")
+    n = int(f)
+    if n < 1 or n != f:
+        raise ValueError("批次（排程行）錯誤，請重新整理頁面")
+    return n
+
+
+def _validate_confirmation(po_no, sched_line, email_id, confirmed_date, note, user
+                           ) -> tuple[str, int, str, str, str, str]:
     if _blank(po_no):
         raise ValueError("請填寫採購單號")
+    sched_line = _to_sched_line(sched_line)
     if _blank(email_id):
         raise ValueError("請填寫信件編號")
     d = str(confirmed_date or "").strip()
@@ -180,11 +210,12 @@ def _validate_confirmation(po_no, email_id, confirmed_date, note, user
         raise ValueError("請填寫確認後的交期日期（YYYY-MM-DD）") from None
     if _blank(user):
         raise ValueError("請填寫姓名")
-    return str(po_no).strip(), str(email_id).strip(), d, str(note or "").strip(), str(user).strip()
+    return (str(po_no).strip(), sched_line, str(email_id).strip(), d,
+            str(note or "").strip(), str(user).strip())
 
 
-def confirm_eta(db, po_no: str, email_id: str, confirmed_date: str, note: str, user: str, *,
-                now: str | None = None) -> None:
+def confirm_eta(db, po_no: str, sched_line: int, email_id: str, confirmed_date: str,
+                note: str, user: str, *, now: str | None = None) -> None:
     """
     登錄企劃向供應商確認到的交期。
 
@@ -192,28 +223,45 @@ def confirm_eta(db, po_no: str, email_id: str, confirmed_date: str, note: str, u
     覆寫舊確認」，因為確認紀錄本身就是稽核用的歷史（誰、何時、改口過
     幾次），load_confirmations() 才是取「目前生效的最新一筆」的地方。
 
+    sched_line：確認的是這張單的哪一批。分批交貨時，企劃可能只跟供應商
+    確認了其中一批，套用時要跟 po_no 一起當鍵（見 pipeline.retriage()），
+    不能讓一批的確認蓋掉另一批。
+
     email_id 必須跟著存：套用時要求 email_id 對得上目前這封信，
     否則供應商隔天又來一封改口的新信，舊確認會誤蓋掉新資訊
     （見 pipeline.retriage()）。
     """
-    po_no, email_id, confirmed_date, note, user = _validate_confirmation(
-        po_no, email_id, confirmed_date, note, user)
+    po_no, sched_line, email_id, confirmed_date, note, user = _validate_confirmation(
+        po_no, sched_line, email_id, confirmed_date, note, user)
     ts = _now(now)
     with closing(_connect(db)) as con:
         con.execute(
-            "INSERT INTO eta_confirmation (po_no, email_id, confirmed_date, note,"
-            " confirmed_by, confirmed_at) VALUES (?,?,?,?,?,?)",
-            (po_no, email_id, confirmed_date, note, user, ts))
+            "INSERT INTO eta_confirmation (po_no, sched_line, email_id, confirmed_date, note,"
+            " confirmed_by, confirmed_at) VALUES (?,?,?,?,?,?,?)",
+            (po_no, sched_line, email_id, confirmed_date, note, user, ts))
         con.commit()
 
 
-def load_confirmations(db: Path | str | None = None) -> dict[str, dict]:
-    """每張單只取最新一筆確認（confirm_id 最大）。"""
+def load_confirmations(db: Path | str | None = None) -> dict[tuple[str, int], dict]:
+    """
+    每張單的每一批只取最新一筆確認（confirm_id 最大）。
+
+    鍵是 (po_no, sched_line)，不是單純 po_no——分批交貨時每一批各自
+    追蹤，確認也要能各自套用（見 pipeline.retriage()）。sched_line 是
+    NULL 的舊資料（Task 3 以前存的，那時整張單只有一批）一律視為第 1
+    行，GROUP BY 用 COALESCE 讓舊資料跟新資料的「第 1 行」是同一組。
+    """
     with closing(_connect(db)) as con:
         rows = con.execute(
             "SELECT * FROM eta_confirmation WHERE confirm_id IN "
-            "(SELECT MAX(confirm_id) FROM eta_confirmation GROUP BY po_no)").fetchall()
-        return {r["po_no"]: dict(r) for r in rows}
+            "(SELECT MAX(confirm_id) FROM eta_confirmation "
+            " GROUP BY po_no, COALESCE(sched_line, 1))").fetchall()
+        result: dict[tuple[str, int], dict] = {}
+        for r in rows:
+            d = dict(r)
+            d["sched_line"] = 1 if d.get("sched_line") is None else int(d["sched_line"])
+            result[(d["po_no"], d["sched_line"])] = d
+        return result
 
 
 def confirmation_log(db: Path | str | None = None) -> list[dict]:

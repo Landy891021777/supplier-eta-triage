@@ -26,7 +26,7 @@ import draft as draft_mod  # noqa: E402
 import exports  # noqa: E402
 import planner_settings  # noqa: E402
 import triage  # noqa: E402
-from domain import COMMITMENT_LABEL_ZH  # noqa: E402
+from domain import COMMITMENT_LABEL_ZH, batch_label, coalesce_sched_line  # noqa: E402
 from llm.provider import NullProvider, get_provider  # noqa: E402
 
 CONFIRM_LOG_RENAME = {"confirmed_at": "確認時間", "confirmed_date": "確認後交期",
@@ -70,21 +70,24 @@ with st.expander(f"📌 今日已確認（{len(confirmed_map)}）"):
     if not confirmed_map:
         st.caption("目前沒有登錄過的確認交期。")
     else:
-        current_email = ui_state.current_email_by_po(result)
-        in_list = set(actions["po_no"])
+        # 鍵是 (po_no, sched_line)：分批交貨時，同一張單的每一批各自
+        # 確認、各自判斷生效中／已被取代（見 planner_settings.load_confirmations）。
+        current_email = ui_state.current_email_by_line(result)
+        in_list = set(zip(actions["po_no"], actions["sched_line"].map(coalesce_sched_line)))
         conf_rows = [{
-            "採購單號": po,
+            "採購單號": po_no,
+            "批次": sched_line,
             "確認後交期": c.get("confirmed_date", ""),
             "確認人": c.get("confirmed_by", ""),
             "確認時間": c.get("confirmed_at", ""),
             "備註": c.get("note") or "",
-            # 生效中／已被新信取代：跟這張單目前（去重後最新一封）的
+            # 生效中／已被新信取代：跟這一批目前（去重後最新一封）的
             # email_id 比對，對不上代表供應商後來又寄過新信，這筆確認
             # 已經作廢（見 pipeline.retriage 的說明）。
-            "狀態": ("生效中" if current_email.get(po) == c.get("email_id")
+            "狀態": ("生效中" if current_email.get((po_no, sched_line)) == c.get("email_id")
                     else "已被新信取代"),
-            "仍在行動清單中": "是" if po in in_list else "否",
-        } for po, c in confirmed_map.items()]
+            "仍在行動清單中": "是" if (po_no, sched_line) in in_list else "否",
+        } for (po_no, sched_line), c in confirmed_map.items()]
         st.dataframe(
             pd.DataFrame(conf_rows).sort_values("確認時間", ascending=False),
             width="stretch", hide_index=True)
@@ -112,18 +115,28 @@ else:
     # 顯示用的表格才轉中文標籤；view／actions 本身的 commitment_strength
     # 仍是原始值（confirmed/estimated/...），下游的匯出與判斷邏輯要用的是它。
     display_df = view[["priority", "gap_days", "conservative_eta", "available_date", "po_no",
-                       "material_id", "supplier_name", "committed_date", "new_eta",
+                       "sched_line", "sched_lines_total", "sched_qty", "material_id",
+                       "supplier_name", "committed_date", "new_eta",
                        "commitment_strength", "needs_human_review"]].copy()
+    # 批次／本批數量：分批交貨時，企劃要先知道「這是哪一批」才看得懂
+    # 後面的日期與數量；只有一筆排程行的單顯示「—」（見 domain.batch_label）。
+    display_df["批次"] = [batch_label(sl, tot) for sl, tot in
+                         zip(display_df["sched_line"], display_df["sched_lines_total"])]
+    display_df["本批數量"] = display_df["sched_qty"].map(
+        lambda q: "" if q is None or q != q else str(int(q)))
     display_df["commitment_strength"] = display_df["commitment_strength"].map(
         lambda v: COMMITMENT_LABEL_ZH.get(v, v))
     display_df["needs_human_review"] = display_df["needs_human_review"].map({True: "是", False: "否"})
+    display_df = display_df.rename(columns={
+        "priority": "優先級", "gap_days": "預估缺料天數", "conservative_eta": "保守到料日",
+        "available_date": "可投產日", "po_no": "採購單號",
+        "material_id": "料號", "supplier_name": "供應商",
+        "committed_date": "原承諾日", "new_eta": "新交期",
+        "commitment_strength": "承諾強度", "needs_human_review": "需人工確認"})
     st.dataframe(
-        display_df.rename(columns={
-            "priority": "優先級", "gap_days": "預估缺料天數", "conservative_eta": "保守到料日",
-            "available_date": "可投產日", "po_no": "採購單號",
-            "material_id": "料號", "supplier_name": "供應商",
-            "committed_date": "原承諾日", "new_eta": "新交期",
-            "commitment_strength": "承諾強度", "needs_human_review": "需人工確認"}),
+        display_df[["優先級", "預估缺料天數", "保守到料日", "可投產日", "採購單號", "批次",
+                    "料號", "供應商", "原承諾日", "新交期", "本批數量", "承諾強度",
+                    "需人工確認"]],
         width="stretch", hide_index=True, height=280)
 
     st.divider()
@@ -138,7 +151,16 @@ else:
     for _, row in rows_to_show.iterrows():
         icon = ui_state.PRIORITY_COLOR.get(row["priority"], "⚪")
         flag = " ⚠️ 需人工確認" if row["needs_human_review"] else ""
-        header = (f"{icon} **{row['priority']}**　{row['po_no']}　"
+        sched_line = coalesce_sched_line(row.get("sched_line"))
+        # 只有分批交貨（超過一筆排程行）的單才在標題標出第幾批／共幾批，
+        # 單一排程行的單維持原本的標題，不多一段沒有意義的「第 1 批／共 1 批」。
+        sched_total = row.get("sched_lines_total")
+        try:
+            batch_suffix = (f"（第 {sched_line} 批／共 {int(sched_total)} 批）"
+                            if sched_total is not None and int(sched_total) > 1 else "")
+        except (TypeError, ValueError):
+            batch_suffix = ""
+        header = (f"{icon} **{row['priority']}**　{row['po_no']}{batch_suffix}　"
                   f"{row['material_id']}　{row['supplier_name']}　"
                   f"（{ui_state.fmt_gap(row['gap_days'])}）{flag}")
         with st.expander(header):
@@ -170,21 +192,28 @@ else:
                         default_date = (triage._d(row.get("new_eta"))
                                         or triage._d(row.get("committed_date"))
                                         or date.today())
-                        with st.form(key=f"confirm-{po_no}-{email_id}"):
+                        # key 要帶 sched_line：分批交貨時同一張單有兩個展開區、
+                        # 兩個表單，沒有這個區分兩批的表單 key 會撞在一起。
+                        with st.form(key=f"confirm-{po_no}-{sched_line}-{email_id}"):
                             st.caption(
                                 "向供應商要到確切日期後在這裡登錄，清單會改用這個日期"
                                 "重算。**這裡只記錄在工具內，不會寫回 ERP**；"
                                 "請依公司流程更新交貨排程行。")
-                            c_date = st.date_input("確認後的交期", value=default_date,
-                                                   key=f"confirm_date_{po_no}_{email_id}")
-                            c_note = st.text_input("備註（選填）",
-                                                   key=f"confirm_note_{po_no}_{email_id}")
-                            c_user = st.text_input("姓名（必填）",
-                                                   key=f"confirm_user_{po_no}_{email_id}")
+                            c_date = st.date_input(
+                                "確認後的交期", value=default_date,
+                                key=f"confirm_date_{po_no}_{sched_line}_{email_id}")
+                            c_note = st.text_input(
+                                "備註（選填）",
+                                key=f"confirm_note_{po_no}_{sched_line}_{email_id}")
+                            c_user = st.text_input(
+                                "姓名（必填）",
+                                key=f"confirm_user_{po_no}_{sched_line}_{email_id}")
                             if st.form_submit_button(
-                                    "登錄確認", key=f"confirm_submit_{po_no}_{email_id}"):
+                                    "登錄確認",
+                                    key=f"confirm_submit_{po_no}_{sched_line}_{email_id}"):
                                 ok, msg = ui_state.submit_confirmation(
-                                    po_no, email_id, c_date.isoformat(), c_note, c_user)
+                                    po_no, sched_line, email_id, c_date.isoformat(),
+                                    c_note, c_user)
                                 if ok:
                                     # st.success 接著 st.rerun() 會來不及顯示就被
                                     # 蓋掉；st.toast 設計上會跨這一次 rerun 留著，
@@ -198,7 +227,8 @@ else:
                 # 已確認的單，理由第一條已經寫明誰、哪天確認（見 pipeline.retriage）；
                 # 這裡另外列出完整確認歷史（新到舊），即使這張單現在已經不再
                 # 需人工確認，只要曾經確認過就要看得到「改口過幾次」。
-                po_log = [c for c in all_confirm_log if c["po_no"] == row["po_no"]]
+                po_log = [c for c in all_confirm_log if c["po_no"] == row["po_no"]
+                         and coalesce_sched_line(c.get("sched_line")) == sched_line]
                 if po_log:
                     st.markdown("**這張單的確認紀錄**")
                     log_df = pd.DataFrame(

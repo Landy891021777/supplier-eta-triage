@@ -28,6 +28,7 @@ if str(ROOT / "src") not in sys.path:
 
 import pipeline  # noqa: E402
 import planner_settings  # noqa: E402
+from domain import coalesce_sched_line  # noqa: E402
 from llm.provider import get_provider  # noqa: E402
 
 PRIORITY_COLOR = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "待查": "⚪", "—": "⚫"}
@@ -162,19 +163,27 @@ def context() -> dict:
                provider=provider, use_llm=use_llm)
 
 
-def current_email_by_po(result: dict) -> dict:
+def current_email_by_line(result: dict) -> dict:
     """
-    每張單「目前」對應的信件編號（result["all"] 去重後、每個 po_no 唯一
-    的最新一封信）。
+    每個「採購單 × 排程行」目前對應的信件編號（result["all"] 去重後、
+    每個 (po_no, sched_line) 唯一的最新一封信）。
 
     給確認紀錄判斷「生效中」還是「已被新信取代」用：一筆確認紀錄的
-    email_id 如果跟這張單目前的 email_id 不同，就代表供應商後來又寄過
-    新信，這筆確認已經作廢（見 pipeline.retriage() 的說明）。
+    email_id 如果跟這一批目前的 email_id 不同，就代表供應商後來又寄過
+    新信，這筆確認已經作廢（見 pipeline.retriage() 的說明）。鍵是
+    (po_no, sched_line) 不是單純 po_no——分批交貨時每一批各自判斷，
+    不能因為另一批來了新信就連帶把這一批也標成「已被取代」。
     """
     all_df = result.get("all")
     if all_df is None or "email_id" not in all_df.columns:
         return {}
-    return all_df.set_index("po_no")["email_id"].to_dict()
+    if "sched_line" not in all_df.columns:
+        return {(po, 1): email for po, email in
+                all_df.set_index("po_no")["email_id"].to_dict().items()}
+    out = {}
+    for row in all_df[["po_no", "sched_line", "email_id"]].itertuples(index=False):
+        out[(row.po_no, coalesce_sched_line(row.sched_line))] = row.email_id
+    return out
 
 
 @st.cache_data(show_spinner=False)
@@ -254,8 +263,9 @@ def outcomes_df():
     return outcomes
 
 
-def submit_confirmation(po_no: str, email_id: str, confirmed_date: str, note: str,
-                        user: str, *, db=None, now: str | None = None) -> tuple[bool, str]:
+def submit_confirmation(po_no: str, sched_line: int, email_id: str, confirmed_date: str,
+                        note: str, user: str, *, db=None,
+                        now: str | None = None) -> tuple[bool, str]:
     """
     包一層給表單 callback／測試共用。
 
@@ -264,9 +274,12 @@ def submit_confirmation(po_no: str, email_id: str, confirmed_date: str, note: st
     給 st.error 顯示，測試則想繞過巢狀 st.expander／st.form 裡的元件、
     直接驗證「送出確認」這個動作本身的效果（見
     tests/test_app_pages.py 的說明）。
+
+    sched_line：確認的是這張單的哪一批，跟著 po_no 一起當鍵。
     """
     try:
-        planner_settings.confirm_eta(db, po_no, email_id, confirmed_date, note, user, now=now)
+        planner_settings.confirm_eta(db, po_no, sched_line, email_id, confirmed_date,
+                                     note, user, now=now)
     except ValueError as e:
         return False, str(e)
     return True, ""

@@ -43,9 +43,9 @@ def _row(**kw):
 
 def test_confirmation_requires_date_and_name(db):
     with pytest.raises(ValueError, match="日期"):
-        ps.confirm_eta(db, "A", "E1", "", "電話確認", "王小明")
+        ps.confirm_eta(db, "A", 1, "E1", "", "電話確認", "王小明")
     with pytest.raises(ValueError, match="姓名"):
-        ps.confirm_eta(db, "A", "E1", "2026-10-25", "電話確認", " ")
+        ps.confirm_eta(db, "A", 1, "E1", "2026-10-25", "電話確認", " ")
 
 
 def test_confirmation_rejects_nan_po_no_and_email_id(db):
@@ -56,13 +56,13 @@ def test_confirmation_rejects_nan_po_no_and_email_id(db):
     英文的 AttributeError。
     """
     with pytest.raises(ValueError, match="採購單號"):
-        ps.confirm_eta(db, float("nan"), "E1", "2026-10-30", "", "王小明")
+        ps.confirm_eta(db, float("nan"), 1, "E1", "2026-10-30", "", "王小明")
     with pytest.raises(ValueError, match="信件編號"):
-        ps.confirm_eta(db, "A", None, "2026-10-30", "", "王小明")
+        ps.confirm_eta(db, "A", 1, None, "2026-10-30", "", "王小明")
 
 
 def test_confirmed_date_is_used_and_review_flag_cleared(db):
-    ps.confirm_eta(db, "A", "E1", "2026-10-25", "電話確認", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-25", "電話確認", "王小明", now="2026-09-22 10:00")
     out = pipeline.retriage(pd.DataFrame([_row()]), {}, TCFG,
                             confirmations=ps.load_confirmations(db))
     r = out.set_index("po_no").loc["A"]
@@ -83,7 +83,7 @@ def test_newer_supplier_email_supersedes_old_confirmation(db):
     狀態（needs_human_review 仍是 True，commitment_strength 不是
     confirmed），不能因為提到了舊確認就被誤判成已確認。
     """
-    ps.confirm_eta(db, "A", "E1", "2026-10-25", "電話確認", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-25", "電話確認", "王小明", now="2026-09-22 10:00")
     out = pipeline.retriage(pd.DataFrame([_row(email_id="E2", new_eta="2026-11-10")]), {},
                             TCFG, confirmations=ps.load_confirmations(db))
     r = out.set_index("po_no").loc["A"]
@@ -95,10 +95,10 @@ def test_newer_supplier_email_supersedes_old_confirmation(db):
 
 
 def test_confirmation_log_keeps_every_entry(db):
-    ps.confirm_eta(db, "A", "E1", "2026-10-25", "電話", "王小明", now="2026-09-22 10:00")
-    ps.confirm_eta(db, "A", "E1", "2026-10-28", "改口", "王小明", now="2026-09-22 15:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-25", "電話", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-28", "改口", "王小明", now="2026-09-22 15:00")
     assert [c["confirmed_date"] for c in ps.confirmation_log(db)] == ["2026-10-25", "2026-10-28"]
-    assert ps.load_confirmations(db)["A"]["confirmed_date"] == "2026-10-28"
+    assert ps.load_confirmations(db)[("A", 1)]["confirmed_date"] == "2026-10-28"
 
 
 def test_no_confirmations_changes_nothing():
@@ -125,7 +125,7 @@ def test_confirming_a_no_change_row_still_re_derives_change_type(db):
     row = _row(change_type="no_change", commitment_strength="confirmed",
               new_eta="2026-10-18", committed_date="2026-10-18",
               need_date="2026-10-20", needs_human_review=False)
-    ps.confirm_eta(db, "A", "E1", "2026-11-05", "", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-11-05", "", "王小明", now="2026-09-22 10:00")
     out = pipeline.retriage(pd.DataFrame([row]), {}, TCFG,
                             confirmations=ps.load_confirmations(db))
     assert "A" in set(out["po_no"]), "列不該因為 no_change 短路而整筆消失"
@@ -141,7 +141,7 @@ def test_confirmed_reason_says_confirmed_date_not_supplier_said(db):
     「供應商說 {date}」——日期是企劃自己跟供應商要到、登錄進工具的，
     不是供應商信件裡寫的，用詞要對得上事實來源。
     """
-    ps.confirm_eta(db, "A", "E1", "2026-10-25", "", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-25", "", "王小明", now="2026-09-22 10:00")
     out = pipeline.retriage(pd.DataFrame([_row()]), {}, TCFG,
                             confirmations=ps.load_confirmations(db))
     r = out.set_index("po_no").loc["A"]
@@ -156,7 +156,7 @@ def test_unmatched_row_ignores_confirmation_even_if_po_no_matches(db):
     也沒有 triage.evaluate() 可以重算——即使 confirmations 剛好有同一個
     po_no 的確認紀錄，也不能套用，否則會用一個沒有依據的日期覆寫這一列。
     """
-    ps.confirm_eta(db, "X", "E9", "2026-10-30", "", "王小明")
+    ps.confirm_eta(db, "X", 1, "E9", "2026-10-30", "", "王小明")
     row = {"po_no": "X", "email_id": "E9", "matched": False, "gap_days": None,
           "priority": "待查", "reasons": ["信中的 PO 號對不到主檔，需人工確認"],
           "actions": [], "needs_human_review": True, "note": "",
@@ -167,6 +167,28 @@ def test_unmatched_row_ignores_confirmation_even_if_po_no_matches(db):
     assert r["needs_human_review"]
     assert r["reasons"] == ["信中的 PO 號對不到主檔，需人工確認"]
     assert "new_eta" not in r or pd.isna(r.get("new_eta"))
+
+
+def test_confirmation_bound_to_one_batch_does_not_affect_the_other(db):
+    """
+    分批交貨迴歸測試：同一張單兩批各一列（sched_line 不同），只確認
+    第 2 批的交期，第 1 批要完全不受影響——鍵是 (po_no, sched_line)，
+    不是單純 po_no，否則一批的確認會誤蓋掉另一批的分級（見決策 19）。
+    """
+    batch1 = _row(sched_line=1)
+    batch2 = _row(sched_line=2, new_eta="2026-11-20", committed_date="2026-11-01")
+    ps.confirm_eta(db, "A", 2, "E1", "2026-12-01", "改期", "王小明", now="2026-09-22 10:00")
+    out = pipeline.retriage(pd.DataFrame([batch1, batch2]), {}, TCFG,
+                            confirmations=ps.load_confirmations(db)).set_index("sched_line")
+
+    r2 = out.loc[2]
+    assert r2["new_eta"] == "2026-12-01" and r2["commitment_strength"] == "confirmed"
+    assert not r2["needs_human_review"]
+
+    r1 = out.loc[1]
+    assert r1["new_eta"] == "2026-10-10"          # _row() 預設值，未被第 2 批的確認蓋掉
+    assert r1["commitment_strength"] == "intent_only"
+    assert r1["needs_human_review"]
 
 
 def test_confirming_a_originally_unavailable_row_never_shows_zero_samples(db):
@@ -189,7 +211,7 @@ def test_confirming_a_originally_unavailable_row_never_shows_zero_samples(db):
     row["delay_basis_hist"] = "改期過的單"
     row["estimate_available_hist"] = True
     row["estimate_reason_hist"] = ""
-    ps.confirm_eta(db, "A", "E1", "2026-10-30", "", "王小明", now="2026-09-22 10:00")
+    ps.confirm_eta(db, "A", 1, "E1", "2026-10-30", "", "王小明", now="2026-09-22 10:00")
     out = pipeline.retriage(pd.DataFrame([row]), {}, TCFG,
                             confirmations=ps.load_confirmations(db))
     r = out.set_index("po_no").loc["A"]

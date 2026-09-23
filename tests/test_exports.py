@@ -33,7 +33,7 @@ def test_followup_workbook_keeps_p1_p2_and_pending_only():
     wb = load_workbook(io.BytesIO(exports.followup_workbook(_actions(), "2026-09-08")))
     ws = wb["追料清單"]
     header = [c.value for c in ws[1]]
-    assert header[:4] == ["優先級", "預估缺料天數", "採購單號", "料號"]
+    assert header[:5] == ["優先級", "預估缺料天數", "採購單號", "批次", "料號"]
     pos = [r[header.index("採購單號")] for r in ws.iter_rows(min_row=2, values_only=True)]
     assert pos == ["A", "C"]
     assert "說明" in wb.sheetnames
@@ -49,6 +49,29 @@ def test_followup_workbook_writes_integers_and_joined_text():
     assert rows[1][header.index("預估缺料天數")] in (None, "")
     assert rows[0][header.index("建議動作")] == "a1"
     assert rows[0][header.index("數量")] == "80 GAL"
+
+
+def test_followup_workbook_shows_batch_and_this_batch_quantity():
+    """
+    分批交貨：批次欄要顯示第幾批，本批數量要是這一批的量，不是整張單的
+    總量（PO A 項次總量 80 GAL，但這一批只出 12 GAL）；只有一筆排程行
+    的單（PO C）批次欄顯示「—」。
+    """
+    df = _actions()
+    df.loc[df["po_no"] == "A", "sched_line"] = 2
+    df.loc[df["po_no"] == "A", "sched_lines_total"] = 2
+    df.loc[df["po_no"] == "A", "sched_qty"] = 12
+    df.loc[df["po_no"] == "C", "sched_line"] = 1
+    df.loc[df["po_no"] == "C", "sched_lines_total"] = 1
+    df.loc[df["po_no"] == "C", "sched_qty"] = 80
+    wb = load_workbook(io.BytesIO(exports.followup_workbook(df, "2026-09-08")))
+    ws = wb["追料清單"]
+    header = [c.value for c in ws[1]]
+    rows = {r[header.index("採購單號")]: r for r in ws.iter_rows(min_row=2, values_only=True)}
+    assert rows["A"][header.index("批次")] == "2"
+    assert rows["A"][header.index("本批數量")] == "12 GAL"
+    assert rows["A"][header.index("數量")] == "80 GAL"
+    assert rows["C"][header.index("批次")] == "—"
 
 
 def test_followup_workbook_shows_commitment_strength_in_chinese():

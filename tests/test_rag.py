@@ -174,6 +174,18 @@ def test_pinning_preserves_question_order(retriever):
     assert ids[:2] == ["SUP:SUP-R02", "SUP:SUP-W02"]
 
 
+def test_pinning_pins_every_batch_card_of_a_split_po(retriever):
+    """
+    分批交貨的迴歸測試：PO-2026-04188 拆成兩批，兩批各自一張卡
+    （PO:PO-2026-04188#1、PO:PO-2026-04188#2）。問句只提到單號，
+    看不出使用者要問哪一批，兩張卡都要被釘選出來——只釘到其中一批，
+    企劃會看不到另一批「準時／延遲」的事實（見決策 19）。
+    """
+    ids = [h.card.card_id for h in retriever.search("PO-2026-04188 目前狀況如何", k=8)]
+    assert "PO:PO-2026-04188#1" in ids
+    assert "PO:PO-2026-04188#2" in ids
+
+
 def test_pinning_can_be_disabled_for_evaluation(retriever):
     pinned = retriever.search("PO-2026-04278 的供應商", k=5, pin=True)
     unpinned = retriever.search("PO-2026-04278 的供應商", k=5, pin=False)

@@ -128,6 +128,49 @@ REASON_CODES = {
 }
 
 
+def coalesce_sched_line(v) -> int:
+    """
+    把排程行號正規化成 int：None／NaN（未對到 PO 主檔的列、Task 3 以前
+    存的舊資料、只有一筆排程行時測試自己組的精簡資料）一律當成第 1 行。
+
+    pipeline.py（retriage 比對確認紀錄）、planner_settings.py（讀舊格式
+    的確認紀錄）、ui_state.py／views/actions.py（畫面判斷確認是否生效）
+    都要對「沒有 sched_line」這件事做同一個決定，寫一份放在這裡，
+    不然哪天只改到一處，同一張單在不同畫面會被判成不同批次。
+    """
+    if v is None:
+        return 1
+    try:
+        if v != v:  # NaN
+            return 1
+    except TypeError:
+        pass
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 1
+
+
+def batch_label(sched_line, total_lines) -> str:
+    """
+    「批次」欄的顯示值：只有一筆排程行（沒有分批）時顯示「—」，
+    分批交貨時顯示第幾批（sched_line）。
+
+    畫面（views/actions.py）與匯出（exports.py）都要顯示同一件事，
+    只寫一份，避免哪天改了規則卻只改到一邊。
+    """
+    try:
+        total = int(total_lines)
+    except (TypeError, ValueError):
+        return "—"
+    if total <= 1:
+        return "—"
+    try:
+        return str(int(sched_line))
+    except (TypeError, ValueError):
+        return "—"
+
+
 @dataclass
 class ExtractedRecord:
     """單一封信中，針對某一張 PO 解析出來的一筆結果。"""

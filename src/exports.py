@@ -39,13 +39,16 @@ from datetime import date, datetime
 import pandas as pd
 
 import triage
-from domain import CATEGORY_LABEL_ZH, COMMITMENT_LABEL_ZH
+from domain import CATEGORY_LABEL_ZH, COMMITMENT_LABEL_ZH, batch_label
 
 # 企劃看得懂的欄位順序：CSV（行動清單）與 Excel（追料清單）共用同一套，
 # 同一件事只有一套轉換規則，兩處欄位才不會對不上（見 to_planner_rows）。
-PLANNER_COLUMNS = ["優先級", "預估缺料天數", "採購單號", "料號", "料別", "供應商", "數量",
-                   "新交期", "原承諾日", "保守到料日", "可投產日", "需求日", "承諾強度",
-                   "需人工確認", "建議動作", "理由"]
+# 「批次」放在採購單號後面——分批交貨時，企劃第一眼要知道「這是哪一批」
+# 才看得懂後面的數字；「本批數量」跟在「數量」（項次總量）後面，
+# 兩個數字放在一起才比得出「這批只佔整張單的多少」。
+PLANNER_COLUMNS = ["優先級", "預估缺料天數", "採購單號", "批次", "料號", "料別", "供應商",
+                   "數量", "本批數量", "新交期", "原承諾日", "保守到料日", "可投產日",
+                   "需求日", "承諾強度", "需人工確認", "建議動作", "理由"]
 FOLLOWUP_COLUMNS = PLANNER_COLUMNS  # 舊名沿用，避免其他地方 import 這個名字時炸掉
 
 # 追料清單裡要寫成真正 Excel 日期（而不是文字）的欄位：Excel 才能排序、
@@ -91,8 +94,14 @@ def _date_or_blank(v):
     return triage._d(v)
 
 
-def _qty_text(qty, uom) -> str:
-    """數量寫成「80 GAL」；缺單位（NaN／空字串）只寫數量，不留一個懸空的空格。"""
+def qty_text(qty, uom) -> str:
+    """
+    數量寫成「80 GAL」；缺單位（NaN／空字串）只寫數量，不留一個懸空的空格。
+
+    不加底線前綴：views/actions.py 的「今日行動清單」表格跟這裡的
+    Excel／CSV 匯出，數量都要用同一套格式化規則，不能一個顯示
+    「80.0」、一個顯示「80 GAL」——同一件事只有一份轉換規則。
+    """
     uom = triage._clean_str(uom)
     try:
         f = float(qty)
@@ -152,10 +161,14 @@ def to_planner_rows(df: pd.DataFrame) -> pd.DataFrame:
         "優先級": df["priority"],
         "預估缺料天數": _col(df, "gap_days").map(_int_or_blank),
         "採購單號": df["po_no"],
+        "批次": [batch_label(sl, tot) for sl, tot in
+                zip(_col(df, "sched_line"), _col(df, "sched_lines_total"))],
         "料號": _col(df, "material_id").map(triage._clean_str),
         "料別": _col(df, "category").map(_category_label),
         "供應商": _col(df, "supplier_name").map(triage._clean_str),
-        "數量": [_qty_text(q, u) for q, u in zip(_col(df, "qty"), _col(df, "base_uom"))],
+        "數量": [qty_text(q, u) for q, u in zip(_col(df, "qty"), _col(df, "base_uom"))],
+        "本批數量": [qty_text(q, u) for q, u in
+                  zip(_col(df, "sched_qty"), _col(df, "base_uom"))],
         "新交期": _col(df, "new_eta").map(_date_or_blank),
         "原承諾日": _col(df, "committed_date").map(_date_or_blank),
         "保守到料日": _col(df, "conservative_eta").map(_date_or_blank),
@@ -187,10 +200,10 @@ def followup_workbook(actions: pd.DataFrame, as_of: str) -> bytes:
         out.to_excel(writer, sheet_name="追料清單", index=False)
         ws = writer.sheets["追料清單"]
         ws.freeze_panes = "A2"
-        widths = {"優先級": 8, "預估缺料天數": 12, "採購單號": 12, "料號": 16, "料別": 10,
-                  "供應商": 16, "數量": 10, "新交期": 12, "原承諾日": 12, "保守到料日": 12,
-                  "可投產日": 12, "需求日": 12, "承諾強度": 10, "需人工確認": 10,
-                  "建議動作": 40, "理由": 50}
+        widths = {"優先級": 8, "預估缺料天數": 12, "採購單號": 12, "批次": 8, "料號": 16,
+                  "料別": 10, "供應商": 16, "數量": 10, "本批數量": 10, "新交期": 12,
+                  "原承諾日": 12, "保守到料日": 12, "可投產日": 12, "需求日": 12,
+                  "承諾強度": 10, "需人工確認": 10, "建議動作": 40, "理由": 50}
         for i, col in enumerate(PLANNER_COLUMNS, start=1):
             letter = ws.cell(row=1, column=i).column_letter
             ws.column_dimensions[letter].width = widths[col]
