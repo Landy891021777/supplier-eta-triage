@@ -24,7 +24,7 @@
 tests/test_app_pages.py）。
 
 介面分兩區：「企劃工作區」放物料企劃每天會用的頁面，「專案說明」放
-給面試官看的評估與效益量化（Plan 2 決策）。
+給面試官看的專案簡介、方法驗證與效益估算（Plan 2 決策）。
 =========================================================================
 """
 from __future__ import annotations
@@ -59,8 +59,9 @@ pg = st.navigation({
         st.Page("views/emails.py", title="信件與解析軌跡", icon="📨"),
     ],
     "專案說明": [
-        st.Page("views/experiments.py", title="評估實驗", icon="🧪"),
-        st.Page("views/benefit.py", title="效益量化", icon="📊"),
+        st.Page("views/about.py", title="專案簡介與導覽", icon="📖"),
+        st.Page("views/validation.py", title="方法驗證", icon="🧪"),
+        st.Page("views/benefit.py", title="效益估算", icon="📊"),
     ],
 })
 pg.run()
