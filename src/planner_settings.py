@@ -144,11 +144,32 @@ def change_log(db: Path | str | None = None) -> list[dict]:
             "SELECT * FROM gr_override_log ORDER BY log_id")]
 
 
+def _blank(v) -> bool:
+    """
+    「沒填」的判斷：None、NaN、空字串（含只有空白）都算沒填。
+
+    這裡曾經直接 `str(po_no or "").strip()`：float NaN 是真值（non-zero
+    float 一律 truthy），`nan or ""` 會得到 nan 本身，後面呼叫
+    `po_no.strip()` 就對一個 float 呼叫 .strip()，丟出
+    AttributeError（不是 ValueError，訊息也不是中文，使用者看不懂）。
+    NaN 的 `!=` 比較會直接得到 True（NaN 不等於自己），用這個判斷
+    比 `isinstance(v, float)` 更保險，也對 pandas 讀出來的各種空值型別安全。
+    """
+    if v is None:
+        return True
+    try:
+        if v != v:
+            return True
+    except TypeError:
+        pass
+    return not str(v).strip()
+
+
 def _validate_confirmation(po_no, email_id, confirmed_date, note, user
                            ) -> tuple[str, str, str, str, str]:
-    if not str(po_no or "").strip():
+    if _blank(po_no):
         raise ValueError("請填寫採購單號")
-    if not str(email_id or "").strip():
+    if _blank(email_id):
         raise ValueError("請填寫信件編號")
     d = str(confirmed_date or "").strip()
     if not d:
@@ -157,9 +178,9 @@ def _validate_confirmation(po_no, email_id, confirmed_date, note, user
         date.fromisoformat(d)
     except ValueError:
         raise ValueError("請填寫確認後的交期日期（YYYY-MM-DD）") from None
-    if not str(user or "").strip():
+    if _blank(user):
         raise ValueError("請填寫姓名")
-    return po_no.strip(), email_id.strip(), d, str(note or "").strip(), user.strip()
+    return str(po_no).strip(), str(email_id).strip(), d, str(note or "").strip(), str(user).strip()
 
 
 def confirm_eta(db, po_no: str, email_id: str, confirmed_date: str, note: str, user: str, *,

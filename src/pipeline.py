@@ -117,7 +117,8 @@ def _strength_for_percentile(rec: dict) -> str | None:
     return rec.get("commitment_strength") if has_date else "none"
 
 
-def _derive_change_type(new_eta: str | None, committed_date, current: str | None) -> str:
+def _derive_change_type(new_eta: str | None, committed_date, current: str | None, *,
+                        force: bool = False) -> str:
     """
     依新日期與原承諾日重新判定變更類型（delay／pull_in／no_change）。
 
@@ -129,9 +130,20 @@ def _derive_change_type(new_eta: str | None, committed_date, current: str | None
     只有「目前不是 no_change 而且有新日期」才需要重判：供應商已經明講
     「確認不變」，不該因為日期字串剛好能解析就被誤判成別的類型；
     完全沒有新日期、或新日期解析不出來，維持原本的 change_type，
-    不能瞎猜一個新的出來。
+    不能瞎猜一個新的出來。這條短路只適用於 run() 解析信件的路徑。
+
+    force=True（企劃確認交期的路徑專用）：略過上面那條短路。企劃向
+    供應商要到的確認日期是**比信件更新的事實**：如果它跟原承諾日不同，
+    就是變了，不能讓信件當時「說不變」的舊結論繼續蓋著新事實。
+    這是一個真實發生過的 bug：供應商信件寫「照原計畫」被解析成
+    no_change，企劃事後跟供應商要到一個明顯延後的確認日期，
+    change_type 卻因為短路而原地不動，gap_days 沒有跟著重算，
+    needs_human_review 還被清掉——企劃以為登錄了新日期，
+    分級卻完全沒變，甚至可能整筆從清單消失（見 tests/test_confirmations.py）。
     """
-    if current == ChangeType.NO_CHANGE.value or not new_eta:
+    if not force and (current == ChangeType.NO_CHANGE.value or not new_eta):
+        return current
+    if not new_eta:
         return current
     try:
         new_eta_d = date.fromisoformat(str(new_eta)[:10])
@@ -189,16 +201,34 @@ def _select_estimate(row: dict, strength: str, tcfg: dict) -> dict | None:
     不能因為 delay_days_est 剛好有值就當作有估計去套——那個值是另一個
     百分位（row 原本的承諾強度）算出來的，套在這裡是錯的估計，比
     「沒有估計」更危險。只有欄位整個不存在，才退回 delay_days_est。
+
+    「這家供應商過去（N 筆）」這句話裡的 N 與 basis，不能讀 row 上的
+    delay_n／delay_basis——那兩個欄位是 triage.evaluate() 對「這一列
+    原本的承諾強度」算出來的，待查／提前交貨／確認不變會提早 return，
+    帶著預設值 0／""，不代表這個供應商真的沒有歷史樣本（這正是一個真實
+    bug：企劃確認一張原本是「待查」的單後，明明 delay_days_p80 有值，
+    訊息卻說「過去（0 筆）」）。要知道供應商真正的歷史筆數與依據，
+    只能讀 run() 另外存的 delay_n_hist／delay_basis_hist——那是直接從
+    supplier_stats.estimate_delay() 來的，不會被 triage.evaluate() 的
+    早退路徑污染。欄位不存在（舊格式）才退回 row 上的 delay_n／delay_basis。
     """
     col = _percentile_column(strength)
     if col in row:
         val = row.get(col)
+        hist_n = row.get("delay_n_hist")
+        if hist_n is None:  # 舊格式：沒有 *_hist 欄位，退回原本（可能被污染的）欄位
+            hist_n = row.get("delay_n", 0)
+            hist_basis = row.get("delay_basis", "")
+            hist_reason = row.get("estimate_reason") or ""
+        else:
+            hist_basis = row.get("delay_basis_hist", "")
+            hist_reason = row.get("estimate_reason_hist") or ""
         if triage._missing(val):
-            return {"available": False, "n": row.get("delay_n", 0),
-                    "reason": row.get("estimate_reason") or "歷史樣本不足，不提供保守估計"}
+            return {"available": False, "n": hist_n,
+                    "reason": hist_reason or "歷史樣本不足，不提供保守估計"}
         return {"available": True, "delay_days": int(val),
                 "percentile": triage.percentile_for(strength, tcfg),
-                "basis": row.get("delay_basis", ""), "n": row.get("delay_n", 0)}
+                "basis": hist_basis, "n": hist_n}
 
     if "estimate_available" not in row:
         # 相容舊格式的 all_df：用 delay_n > 0 反推有沒有估計——有估計
@@ -291,11 +321,23 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict,
     套用的條件是 po_no 對得上**而且 email_id 也對得上**——email_id 對不上
     代表供應商在企劃確認之後又寄了新信（例如改口延到更晚），這種情況
     舊確認已經作廢，不能讓它蓋掉新信的內容，寧可讓這張單回到「需人工
-    確認」，也不能顯示一個已經不算數的日期。套用後 new_eta／
-    commitment_strength／change_type 都改用確認後的值（change_type 用
-    跟 run() 相同的 _derive_change_type，兩處判斷同一件事沒有理由用
-    兩套邏輯），needs_human_review 設為 False，並在 reasons 最前面插入
-    一條寫明「誰、哪天確認、尚未寫回 ERP」的說明。
+    確認」，也不能顯示一個已經不算數的日期；這種「作廢」不能默默發生，
+    要在 reasons 第一條寫明是哪個舊確認、被哪封新信作廢，企劃才知道
+    「這張單本來已經確認過」而不是以為工具漏看了自己的確認紀錄。
+    套用後 new_eta／commitment_strength／change_type 都改用確認後的值
+    （change_type 用跟 run() 相同的 _derive_change_type，但傳 force=True：
+    企劃的確認是比信件更新的事實，不能被「信件當時說不變」的舊結論
+    短路掉，見 _derive_change_type 的說明），needs_human_review 設為
+    False，並在 reasons 最前面插入一條寫明「誰、哪天確認、尚未寫回 ERP」
+    的說明；這條說明裡把 triage.evaluate() 原本寫的「供應商說 {日期}」
+    換成「確認交期 {日期}」——那句話原本假設日期一定是供應商信件說的，
+    確認交期的路徑上日期是企劃自己登錄的，用詞要對得上，不能讓企劃以為
+    那是供應商剛講的話。
+
+    對不到 PO 主檔（matched=False）的列，即使 confirmations 裡剛好有
+    同樣 po_no 的確認（理論上不該發生，防禦用），也完全不套用：不到主檔
+    的列沒有 committed_date 可比對，也沒有 triage.evaluate() 可以重算，
+    這裡直接 continue 略過，等同從不查 confirmations。
     """
     if all_df.empty:
         return all_df
@@ -305,17 +347,21 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict,
     for _, series in all_df.iterrows():
         row = series.to_dict()
         if not row.get("matched"):
-            # 對不到 PO 主檔的列本來就沒有可以重算的東西，原樣保留。
+            # 對不到 PO 主檔的列本來就沒有可以重算的東西，原樣保留，
+            # 也不查 confirmations（見上面的說明）。
             rows.append(row)
             continue
 
         po_no = row.get("po_no")
         confirmation = confirmations.get(po_no)
         confirmed = bool(confirmation) and confirmation.get("email_id") == row.get("email_id")
+        # 有確認紀錄、但 email_id 對不上目前這封信：舊確認已經作廢
+        # （見上面的說明），這裡先記下來，等 reasons 算完後插在最前面。
+        superseded = bool(confirmation) and not confirmed
         if confirmed:
             row["change_type"] = _derive_change_type(
                 confirmation["confirmed_date"], row.get("committed_date"),
-                row.get("change_type"))
+                row.get("change_type"), force=True)
             row["new_eta"] = confirmation["confirmed_date"]
             row["commitment_strength"] = CommitmentStrength.CONFIRMED.value
 
@@ -346,10 +392,24 @@ def retriage(all_df: pd.DataFrame, gr_days_by_material: dict, tcfg: dict,
             at = confirmation.get("confirmed_at", "")
             note = confirmation.get("note") or ""
             note_part = f"（{note}）" if note else ""
+            conf_date = confirmation["confirmed_date"]
             prefix = (f"企劃 {by} {at[5:10]} 向供應商確認交期 "
-                      f"{confirmation['confirmed_date']}{note_part}；"
+                      f"{conf_date}{note_part}；"
                       "尚未寫回 ERP，請依公司流程更新交貨排程行")
+            # triage.evaluate() 寫死假設日期是供應商信件說的（「供應商說
+            # {日期}」／「供應商說的日期 {日期}」）；這裡日期是企劃自己
+            # 登錄的確認日期，換個對得上事實的說法，不改其餘文字。
+            reasons = [r.replace(f"供應商說的日期 {conf_date}", f"確認交期 {conf_date}")
+                       .replace(f"供應商說 {conf_date}", f"確認交期 {conf_date}")
+                       for r in reasons]
             reasons = [prefix, *reasons]
+        elif superseded:
+            by = confirmation.get("confirmed_by", "")
+            at = confirmation.get("confirmed_at", "")
+            note_prefix = (f"企劃 {by} {at[5:10]} 依 {confirmation.get('email_id', '')} 確認的 "
+                          f"{confirmation.get('confirmed_date', '')} 已因供應商新信 "
+                          f"{row.get('email_id', '')} 作廢，請重新確認")
+            reasons = [note_prefix, *reasons]
 
         row.update(gap_days=result["gap_days"], conservative_eta=result["conservative_eta"],
                    available_date=result["available_date"], priority=result["priority"],
@@ -490,6 +550,17 @@ def run(cfg: dict | None = None, use_llm: bool = True) -> dict:
                 "delay_days_p80": _pct_delay_days(estimates_by_strength["confirmed"]),
                 "delay_days_p90": _pct_delay_days(estimates_by_strength["estimated"]),
                 "delay_days_p95": _pct_delay_days(estimates_by_strength["intent_only"]),
+                # 供應商真正的歷史筆數／依據——不受 triage.evaluate() 早退路徑
+                # 污染，見 _select_estimate() 與 C2 的說明。三個百分位共用
+                # 同一個 supplier_stats.estimate_delay() 篩樣本池的邏輯
+                # （改期單樣本夠不夠、退回全部單），樣本池的選擇跟百分位
+                # 門檻無關，所以 confirmed/estimated/intent_only 這三次呼叫
+                # 對同一個供應商一定算出相同的 n／basis／是否可用，
+                # 拿哪一個都一樣，這裡固定拿 "confirmed" 那組。
+                "delay_n_hist": int(estimates_by_strength["confirmed"]["n"]),
+                "delay_basis_hist": estimates_by_strength["confirmed"].get("basis", ""),
+                "estimate_available_hist": bool(estimates_by_strength["confirmed"]["available"]),
+                "estimate_reason_hist": estimates_by_strength["confirmed"].get("reason", ""),
                 "gap_days": result["gap_days"],
                 "conservative_eta": result["conservative_eta"],
                 "available_date": result["available_date"],
