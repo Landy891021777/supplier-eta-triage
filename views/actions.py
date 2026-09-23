@@ -26,11 +26,25 @@ import draft as draft_mod  # noqa: E402
 import exports  # noqa: E402
 import planner_settings  # noqa: E402
 import triage  # noqa: E402
-from domain import COMMITMENT_LABEL_ZH, batch_label, coalesce_sched_line  # noqa: E402
+from domain import (COMMITMENT_LABEL_ZH, batch_label, coalesce_batch_key,  # noqa: E402
+                    coalesce_sched_line)
 from llm.provider import NullProvider, get_provider  # noqa: E402
 
 CONFIRM_LOG_RENAME = {"confirmed_at": "確認時間", "confirmed_date": "確認後交期",
                       "note": "備註", "confirmed_by": "確認人"}
+
+
+def _to_int_or_none(v):
+    """NaN／None／無法轉整數一律回傳 None，呼叫端不必各自接 ValueError。"""
+    try:
+        if v is None or v != v:
+            return None
+    except TypeError:
+        pass
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 ctx = ui_state.context()
 result, actions, stats = ctx["result"], ctx["actions"], ctx["stats"]
@@ -70,13 +84,21 @@ with st.expander(f"📌 今日已確認（{len(confirmed_map)}）"):
     if not confirmed_map:
         st.caption("目前沒有登錄過的確認交期。")
     else:
-        # 鍵是 (po_no, sched_line)：分批交貨時，同一張單的每一批各自
-        # 確認、各自判斷生效中／已被取代（見 planner_settings.load_confirmations）。
+        # 鍵是 (po_no, sched_line, batch_key)：分批交貨時，同一張單的每
+        # 一批各自確認、各自判斷生效中／已被取代（見
+        # planner_settings.load_confirmations）。batch_key 多數是空字串
+        # （這個排程行沒有撞批），只有供應商提議拆批、或規則 4 保守退路
+        # 撞批時才會有值。
         current_email = ui_state.current_email_by_line(result)
-        in_list = set(zip(actions["po_no"], actions["sched_line"].map(coalesce_sched_line)))
+        in_list = set(zip(actions["po_no"], actions["sched_line"].map(coalesce_sched_line),
+                          actions["batch_key"].map(coalesce_batch_key)))
         conf_rows = [{
             "採購單號": po_no,
-            "批次": sched_line,
+            # 批次識別：多數是單純的排程行號；撞批時附上 batch_key，
+            # 讓企劃分得出「今日已確認」裡同一張單、同一行的兩筆確認
+            # 分別是哪一批（這裡是稽核用的簡表，不套用 domain.batch_label
+            # 的「提議拆批」完整措辭，那需要另外查 actions 才知道總批數）。
+            "批次": f"{sched_line}" + (f"（{batch_key}）" if batch_key else ""),
             "確認後交期": c.get("confirmed_date", ""),
             "確認人": c.get("confirmed_by", ""),
             "確認時間": c.get("confirmed_at", ""),
@@ -86,8 +108,8 @@ with st.expander(f"📌 今日已確認（{len(confirmed_map)}）"):
             # 已經作廢（見 pipeline.retriage 的說明）。
             "狀態": ("生效中" if current_email.get((po_no, sched_line)) == c.get("email_id")
                     else "已被新信取代"),
-            "仍在行動清單中": "是" if (po_no, sched_line) in in_list else "否",
-        } for (po_no, sched_line), c in confirmed_map.items()]
+            "仍在行動清單中": "是" if (po_no, sched_line, batch_key) in in_list else "否",
+        } for (po_no, sched_line, batch_key), c in confirmed_map.items()]
         st.dataframe(
             pd.DataFrame(conf_rows).sort_values("確認時間", ascending=False),
             width="stretch", hide_index=True)
@@ -115,13 +137,18 @@ else:
     # 顯示用的表格才轉中文標籤；view／actions 本身的 commitment_strength
     # 仍是原始值（confirmed/estimated/...），下游的匯出與判斷邏輯要用的是它。
     display_df = view[["priority", "gap_days", "conservative_eta", "available_date", "po_no",
-                       "sched_line", "sched_lines_total", "sched_qty", "material_id",
+                       "sched_line", "sched_lines_total", "sched_qty",
+                       "proposed_batch_index", "proposed_batch_total", "material_id",
                        "supplier_name", "committed_date", "new_eta",
                        "commitment_strength", "needs_human_review"]].copy()
     # 批次／本批數量：分批交貨時，企劃要先知道「這是哪一批」才看得懂
-    # 後面的日期與數量；只有一筆排程行的單顯示「—」（見 domain.batch_label）。
-    display_df["批次"] = [batch_label(sl, tot) for sl, tot in
-                         zip(display_df["sched_line"], display_df["sched_lines_total"])]
+    # 後面的日期與數量；只有一筆排程行、且不是供應商提議拆批的單顯示
+    # 「—」（見 domain.batch_label）。
+    display_df["批次"] = [
+        batch_label(sl, tot, proposed_total=pt, proposed_index=pi)
+        for sl, tot, pi, pt in zip(display_df["sched_line"], display_df["sched_lines_total"],
+                                   display_df["proposed_batch_index"],
+                                   display_df["proposed_batch_total"])]
     display_df["本批數量"] = display_df["sched_qty"].map(
         lambda q: "" if q is None or q != q else str(int(q)))
     display_df["commitment_strength"] = display_df["commitment_strength"].map(
@@ -152,13 +179,19 @@ else:
         icon = ui_state.PRIORITY_COLOR.get(row["priority"], "⚪")
         flag = " ⚠️ 需人工確認" if row["needs_human_review"] else ""
         sched_line = coalesce_sched_line(row.get("sched_line"))
-        # 只有分批交貨（超過一筆排程行）的單才在標題標出第幾批／共幾批，
-        # 單一排程行的單維持原本的標題，不多一段沒有意義的「第 1 批／共 1 批」。
-        sched_total = row.get("sched_lines_total")
-        try:
-            batch_suffix = (f"（第 {sched_line} 批／共 {int(sched_total)} 批）"
-                            if sched_total is not None and int(sched_total) > 1 else "")
-        except (TypeError, ValueError):
+        batch_key = coalesce_batch_key(row.get("batch_key"))
+        # 標題只在「ERP 已經拆行」或「供應商提議拆批」時才標出第幾批，
+        # 兩種情況講法不同（見 domain.batch_label 的說明）：ERP 已拆行
+        # 是系統事實，「供應商提議拆批」還只是信裡講的，要讓企劃一眼
+        # 分得出兩者差別，不能用同一種措辭。單一排程行、沒有撞批的單
+        # 維持原本的標題。
+        proposed_total = _to_int_or_none(row.get("proposed_batch_total"))
+        sched_total = _to_int_or_none(row.get("sched_lines_total"))
+        if proposed_total and proposed_total > 1:
+            batch_suffix = f"（供應商提議拆 {proposed_total} 批之 {int(row['proposed_batch_index'])}）"
+        elif sched_total and sched_total > 1:
+            batch_suffix = f"（第 {sched_line} 批／共 {sched_total} 批）"
+        else:
             batch_suffix = ""
         header = (f"{icon} **{row['priority']}**　{row['po_no']}{batch_suffix}　"
                   f"{row['material_id']}　{row['supplier_name']}　"
@@ -192,28 +225,31 @@ else:
                         default_date = (triage._d(row.get("new_eta"))
                                         or triage._d(row.get("committed_date"))
                                         or date.today())
-                        # key 要帶 sched_line：分批交貨時同一張單有兩個展開區、
-                        # 兩個表單，沒有這個區分兩批的表單 key 會撞在一起。
-                        with st.form(key=f"confirm-{po_no}-{sched_line}-{email_id}"):
+                        # key 要帶 sched_line 與 batch_key：分批交貨時同一張單
+                        # 可能有兩個展開區、兩個表單，sched_line 區分排程行、
+                        # batch_key 再區分「同一行裡撞在一起的那幾批」（供應商
+                        # 提議拆批、或規則 4 保守退路撞批），少了任何一個，
+                        # key 都可能撞在一起，Streamlit 會報錯或表單互相蓋掉。
+                        with st.form(key=f"confirm-{po_no}-{sched_line}-{batch_key}-{email_id}"):
                             st.caption(
                                 "向供應商要到確切日期後在這裡登錄，清單會改用這個日期"
                                 "重算。**這裡只記錄在工具內，不會寫回 ERP**；"
                                 "請依公司流程更新交貨排程行。")
                             c_date = st.date_input(
                                 "確認後的交期", value=default_date,
-                                key=f"confirm_date_{po_no}_{sched_line}_{email_id}")
+                                key=f"confirm_date_{po_no}_{sched_line}_{batch_key}_{email_id}")
                             c_note = st.text_input(
                                 "備註（選填）",
-                                key=f"confirm_note_{po_no}_{sched_line}_{email_id}")
+                                key=f"confirm_note_{po_no}_{sched_line}_{batch_key}_{email_id}")
                             c_user = st.text_input(
                                 "姓名（必填）",
-                                key=f"confirm_user_{po_no}_{sched_line}_{email_id}")
+                                key=f"confirm_user_{po_no}_{sched_line}_{batch_key}_{email_id}")
                             if st.form_submit_button(
                                     "登錄確認",
-                                    key=f"confirm_submit_{po_no}_{sched_line}_{email_id}"):
+                                    key=f"confirm_submit_{po_no}_{sched_line}_{batch_key}_{email_id}"):
                                 ok, msg = ui_state.submit_confirmation(
-                                    po_no, sched_line, email_id, c_date.isoformat(),
-                                    c_note, c_user)
+                                    po_no, sched_line, batch_key, email_id,
+                                    c_date.isoformat(), c_note, c_user)
                                 if ok:
                                     # st.success 接著 st.rerun() 會來不及顯示就被
                                     # 蓋掉；st.toast 設計上會跨這一次 rerun 留著，
@@ -228,7 +264,8 @@ else:
                 # 這裡另外列出完整確認歷史（新到舊），即使這張單現在已經不再
                 # 需人工確認，只要曾經確認過就要看得到「改口過幾次」。
                 po_log = [c for c in all_confirm_log if c["po_no"] == row["po_no"]
-                         and coalesce_sched_line(c.get("sched_line")) == sched_line]
+                         and coalesce_sched_line(c.get("sched_line")) == sched_line
+                         and coalesce_batch_key(c.get("sched_batch_key")) == batch_key]
                 if po_log:
                     st.markdown("**這張單的確認紀錄**")
                     log_df = pd.DataFrame(

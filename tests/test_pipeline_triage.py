@@ -83,31 +83,153 @@ def test_match_schedule_line_requires_at_least_one_line():
 
 
 # ---------------------------------------------------------------------------
+# _resolve_record_batches：一封信裡同一張單撞在同一個排程行上
+# （分批交貨收尾修正：提議拆批 vs. 規則 4 猜錯是兩件不同的事）
+# ---------------------------------------------------------------------------
+def test_resolve_record_batches_single_record_no_collision():
+    """一封信對這張單只有一筆記錄：跟改版前完全一樣，batch_key 空字串。"""
+    import pipeline
+    po = {"lines": [{"sched_line": 1, "sched_qty": 20, "committed_date": "2026-09-30"}]}
+    out = pipeline._resolve_record_batches([{"qty": None, "new_eta": "2026-09-30"}], po)
+    assert len(out) == 1
+    assert out[0]["sched_line"] == 1
+    assert out[0]["batch_key"] == ""
+    assert not out[0]["is_proposed_split"]
+
+
+def test_resolve_record_batches_proposed_split_when_po_has_one_line():
+    """
+    PO 只有一筆排程行，但這封信對它抽出兩筆記錄（供應商提議拆批）：
+    兩筆都要對到 sched_line=1，is_proposed_split=True，batch_key 用 qty
+    區分，不能讓後面那筆蓋掉前面那筆。
+    """
+    import pipeline
+    po = {"lines": [{"sched_line": 1, "sched_qty": 20, "committed_date": "2026-09-30"}]}
+    records = [{"qty": 8, "new_eta": "2026-09-30"}, {"qty": 12, "new_eta": "2026-11-15"}]
+    out = pipeline._resolve_record_batches(records, po)
+    assert [o["sched_line"] for o in out] == [1, 1]
+    assert [o["batch_key"] for o in out] == ["qty8", "qty12"]
+    assert all(o["is_proposed_split"] for o in out)
+    assert all(o["needs_line_review"] for o in out)
+    assert [o["batch_index"] for o in out] == [1, 2]
+    assert [o["batch_total"] for o in out] == [2, 2]
+
+
+def test_resolve_record_batches_duplicate_qty_still_gets_distinct_keys():
+    """50/50 對分的兩批 qty 剛好相同時，batch_key 仍要彼此不同。"""
+    import pipeline
+    po = {"lines": [{"sched_line": 1, "sched_qty": 20, "committed_date": "2026-09-30"}]}
+    records = [{"qty": 10, "new_eta": "2026-09-30"}, {"qty": 10, "new_eta": "2026-11-15"}]
+    out = pipeline._resolve_record_batches(records, po)
+    keys = [o["batch_key"] for o in out]
+    assert len(set(keys)) == 2, keys
+
+
+def test_resolve_record_batches_rule4_collision_on_multiline_po_is_not_proposed_split():
+    """
+    PO 本來就有兩筆排程行，兩筆記錄都猜不出是哪一批、規則 4 剛好都退到
+    同一個最早的未交行——這不是「供應商提議拆批」（ERP 早就拆好了），
+    要維持各自「對到最早的一批」的說法，不能被覆寫成提議拆批的文字。
+    """
+    import pipeline
+    po = {"lines": [{"sched_line": 1, "sched_qty": 8, "committed_date": "2026-09-30"},
+                    {"sched_line": 2, "sched_qty": 12, "committed_date": "2026-11-15"}]}
+    # 兩筆都給對不上任何一行的 qty／日期，逼它們都落到規則 4。
+    records = [{"qty": 999, "new_eta": "2026-01-01"}, {"qty": 888, "new_eta": "2026-02-02"}]
+    out = pipeline._resolve_record_batches(records, po)
+    assert [o["sched_line"] for o in out] == [1, 1]
+    assert not any(o["is_proposed_split"] for o in out)
+    assert all("未指明是哪一批" in o["match_note"] for o in out)
+    assert len(set(o["batch_key"] for o in out)) == 2, "仍要彼此不同，不能互相蓋掉"
+
+
+# ---------------------------------------------------------------------------
+# _keep_latest_email_per_schedule_line：latest email wins
+# ---------------------------------------------------------------------------
+def test_latest_email_wins_even_when_older_email_had_more_batches():
+    """
+    分批交貨收尾修正的迴歸測試：較舊的一封信把同一個排程行拆成兩批
+    （供應商提議拆批），較新的一封信改口只給單一日期——舊信的兩批都要
+    整組被換掉，只留新信那一列，不能因為舊信「筆數比較多」就留下來跟
+    新信並存。
+    """
+    import pipeline
+    df = pd.DataFrame([
+        {"po_no": "A", "sched_line": 1, "batch_key": "qty8",
+         "received_at": pd.Timestamp("2026-09-08 09:00"), "marker": "old-1"},
+        {"po_no": "A", "sched_line": 1, "batch_key": "qty12",
+         "received_at": pd.Timestamp("2026-09-08 09:00"), "marker": "old-2"},
+        {"po_no": "A", "sched_line": 1, "batch_key": "",
+         "received_at": pd.Timestamp("2026-09-10 09:00"), "marker": "new"},
+    ])
+    out = pipeline._keep_latest_email_per_schedule_line(df)
+    assert list(out["marker"]) == ["new"]
+
+
+def test_latest_email_wins_keeps_all_batches_from_the_latest_email():
+    """反過來：最新一封信才是拆批的那封，兩批都要留下，不能只留一批。"""
+    import pipeline
+    df = pd.DataFrame([
+        {"po_no": "A", "sched_line": 1, "batch_key": "",
+         "received_at": pd.Timestamp("2026-09-08 09:00"), "marker": "old"},
+        {"po_no": "A", "sched_line": 1, "batch_key": "qty8",
+         "received_at": pd.Timestamp("2026-09-10 09:00"), "marker": "new-1"},
+        {"po_no": "A", "sched_line": 1, "batch_key": "qty12",
+         "received_at": pd.Timestamp("2026-09-10 09:00"), "marker": "new-2"},
+    ])
+    out = pipeline._keep_latest_email_per_schedule_line(df)
+    assert set(out["marker"]) == {"new-1", "new-2"}
+
+
+def test_latest_email_wins_keeps_unmatched_rows_with_none_sched_line():
+    """
+    未對到主檔的列 sched_line 是 None：groupby 必須用 dropna=False，
+    否則這些列會被排除在任何一組之外、判成 NaN，永遠留不下來。
+    """
+    import pipeline
+    df = pd.DataFrame([
+        {"po_no": "ZZZ-NOT-FOUND", "sched_line": None, "batch_key": "",
+         "received_at": pd.Timestamp("2026-09-08 09:00"), "marker": "unmatched"},
+    ])
+    out = pipeline._keep_latest_email_per_schedule_line(df)
+    assert list(out["marker"]) == ["unmatched"]
+
+
+# ---------------------------------------------------------------------------
 # HC-010 端到端：分批交貨，兩批各自分級
 # ---------------------------------------------------------------------------
 def test_hc010_partial_delivery_produces_two_rows_first_ok_second_short(result):
     """
-    決策 19 的端到端驗證：HC-010（PO-2026-04188 分批交貨，8 片照原日期、
-    12 片延到 11/15）解析＋對位後，要看到兩個獨立的排程行結果——不能只取
-    最晚一筆（那會把準時的 8 片也一起當成缺料，或反過來完全看不到延遲
-    的 12 片）。
+    決策 19 的端到端驗證（分批交貨收尾修正版）：PO-2026-04188 在 ERP 裡
+    是**單一**排程行（20 片 @ 2026-09-30，尚未拆行），HC-010 的信是供應商
+    「提議」拆成 8 片照原日期、12 片延到 11/15——兩批都要對到同一個
+    sched_line=1（ERP 沒變），但彼此不能互相覆蓋：工具要看到兩個獨立的
+    結果，不能只取最晚一筆（那會把準時的 8 片也一起當成缺料，或反過來
+    完全看不到延遲的 12 片）。
     """
     all_df = result["all"]
-    sub = all_df[all_df["po_no"] == "PO-2026-04188"].set_index("sched_line")
-    assert set(sub.index) == {1, 2}
-    assert sub.loc[1, "sched_qty"] == 8 and sub.loc[2, "sched_qty"] == 12
-    assert sub.loc[1, "sched_lines_total"] == 2 == sub.loc[2, "sched_lines_total"]
+    sub = (all_df[all_df["po_no"] == "PO-2026-04188"]
+          .set_index("batch_key"))
+    assert set(sub.index) == {"qty8", "qty12"}
+    assert (sub["sched_line"] == 1).all(), "ERP 那筆排程行沒有被拆開，兩批都該對到同一行"
+    assert sub.loc["qty8", "sched_qty"] == 8 and sub.loc["qty12", "sched_qty"] == 12
+    assert sub["is_proposed_split"].all(), "兩批都該被標記為供應商提議拆批"
+    assert sub["needs_human_review"].all(), "提議拆批的兩批都要人工確認"
+    assert all("提議把這一行拆成 2 批" in r[0] for r in sub["reasons"])
 
     # 第 1 批（8 片、照原日期到）：不缺料，判為「—」不進行動清單。
-    assert sub.loc[1, "priority"] == "—"
+    assert sub.loc["qty8", "priority"] == "—"
+    assert sub.loc["qty8", "change_type"] == "no_change"
 
-    # 第 2 批（12 片、延到 11/15）：明顯缺料，要進行動清單。
-    assert sub.loc[2, "priority"] in ("P1", "P2", "P3")
-    assert sub.loc[2, "gap_days"] > 0
+    # 第 2 批（12 片、延到 11/15）：明顯缺料，要進行動清單，change_type
+    # 是 delay（跟 ERP 那筆排程行原本的承諾日 2026-09-30 比，真的晚了）。
+    assert sub.loc["qty12", "change_type"] == "delay"
+    assert sub.loc["qty12", "priority"] in ("P1", "P2", "P3")
+    assert sub.loc["qty12", "gap_days"] > 0
 
     actionable_pos = result["actions"][result["actions"]["po_no"] == "PO-2026-04188"]
-    assert len(actionable_pos) == 1
-    assert actionable_pos.iloc[0]["sched_line"] == 2
+    assert len(actionable_pos) == 1, "只有延遲那一批缺料，準時的一批不進行動清單"
+    assert actionable_pos.iloc[0]["batch_key"] == "qty12"
 
 
 def test_weighted_score_is_gone(result):
@@ -165,14 +287,15 @@ def test_retriage_reproduces_runs_own_per_row_evaluation(result):
     matched = all_df[all_df["matched"]].reset_index(drop=True)
     assert len(matched) > 0, "測試資料裡沒有對到 PO 的列，這個一致性測試量不到東西"
 
-    # 鍵是 (po_no, sched_line)，不是單純 po_no：分批交貨的單同一個 po_no
-    # 會有兩列，用 po_no 當索引在 .set_index() 之後會出現重複索引，
-    # .loc[po_no] 撈到的可能是另一批的列，比對永遠對不上（見決策 19）。
-    replay = pipeline.retriage(all_df, {}, tcfg).set_index(["po_no", "sched_line"])
+    # 鍵是 (po_no, sched_line, batch_key)，不是只有 (po_no, sched_line)：
+    # 供應商提議拆批時，同一張單同一個排程行會有兩列（見決策 19 的修正），
+    # 只用前兩個當索引在 .set_index() 之後會出現重複索引，.loc[key] 撈到
+    # 的可能是另一批的列，比對永遠對不上。
+    replay = pipeline.retriage(all_df, {}, tcfg).set_index(["po_no", "sched_line", "batch_key"])
 
     checked = 0
     for _, row in matched.iterrows():
-        key = (row["po_no"], row["sched_line"])
+        key = (row["po_no"], row["sched_line"], row["batch_key"])
         if row["priority"] == "—":
             assert key not in replay.index, key
             continue

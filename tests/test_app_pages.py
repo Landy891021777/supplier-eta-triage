@@ -45,15 +45,20 @@ def _first_needs_review_row():
     直接用底層函式（不透過 Streamlit）找一張目前 needs_human_review 的單，
     跟頁面上看到的資料是同一份（沒有覆寫、沒有確認的乾淨狀態）。
     比起在畫面上用 head(12) 亂猜哪張單會被展開，這樣才能保證測試找到的
-    po_no／sched_line／email_id 是真的存在、而且跟表單 key 用的是同一組值。
+    po_no／sched_line／batch_key／email_id 是真的存在、而且跟表單 key
+    用的是同一組值。
+
+    batch_key 多數是空字串（這個排程行沒有撞批）；只有供應商提議拆批、
+    或規則 4 保守退路撞批的列才有值——見 pipeline._resolve_record_batches。
     """
     import pipeline as _pipeline
-    from domain import coalesce_sched_line
+    from domain import coalesce_batch_key, coalesce_sched_line
     result = _pipeline.run(use_llm=False)
     tcfg = _pipeline.load_config()["triage"]
     actions = _pipeline.retriage(result.get("all", result["actions"]), {}, tcfg)
     row = actions[actions["needs_human_review"]].iloc[0]
-    return row["po_no"], coalesce_sched_line(row.get("sched_line")), row["email_id"]
+    return (row["po_no"], coalesce_sched_line(row.get("sched_line")),
+            coalesce_batch_key(row.get("batch_key")), row["email_id"])
 
 
 def test_confirmation_form_clears_review_flag_and_logs(tmp_path):
@@ -64,7 +69,7 @@ def test_confirmation_form_clears_review_flag_and_logs(tmp_path):
     """
     from datetime import date
 
-    po_no, sched_line, email_id = _first_needs_review_row()
+    po_no, sched_line, batch_key, email_id = _first_needs_review_row()
 
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=300).run()
     at.switch_page("views/actions.py").run()
@@ -75,9 +80,9 @@ def test_confirmation_form_clears_review_flag_and_logs(tmp_path):
     at.checkbox(key="action_only_review").set_value(True)
     at.run()
 
-    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{email_id}").set_value(date(2026, 10, 1))
-    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{email_id}").set_value("王小明")
-    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{email_id}").click()
+    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value(date(2026, 10, 1))
+    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value("王小明")
+    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{batch_key}_{email_id}").click()
     at.run()
     assert not at.exception, at.exception
 
@@ -96,27 +101,28 @@ def test_confirmation_form_clears_review_flag_and_logs(tmp_path):
     at2.run()
     assert not at2.exception, at2.exception
     remaining_keys = {b.key for b in at2.button}
-    assert f"confirm_submit_{po_no}_{sched_line}_{email_id}" not in remaining_keys
+    assert f"confirm_submit_{po_no}_{sched_line}_{batch_key}_{email_id}" not in remaining_keys
 
     # 表單消失只是畫面上的側面證據；真正要守住的是分級本身確實變了——
     # 直接用底層函式重算一次（跟畫面用的是同一份邏輯），檢查這張單的
     # needs_human_review 旗標與第一條理由，而不是只看「按鈕還在不在」
     # 這種容易因為改版面就巧合通過的弱驗證。
     import pipeline as _pipeline
-    from domain import coalesce_sched_line
+    from domain import coalesce_batch_key, coalesce_sched_line
     result2 = _pipeline.run(use_llm=False)
     tcfg2 = _pipeline.load_config()["triage"]
     recomputed = _pipeline.retriage(
         result2.get("all", result2["actions"]), {}, tcfg2,
         confirmations=ps.load_confirmations())
-    # 用 (po_no, sched_line) 當鍵：分批交貨的單同一個 po_no 會有兩列，
-    # 只用 po_no 當索引會撞上重複索引，.loc[po_no] 撈到的可能是另一批。
-    key = (po_no, sched_line)
-    recomputed_keys = set(zip(recomputed["po_no"],
-                              recomputed["sched_line"].map(coalesce_sched_line)))
+    # 用 (po_no, sched_line, batch_key) 當鍵：分批交貨的單同一個
+    # (po_no, sched_line) 可能有兩列（供應商提議拆批），只用前兩者當
+    # 索引會撞上重複索引，.loc[key] 撈到的可能是另一批。
+    key = (po_no, sched_line, batch_key)
+    sched_col = recomputed["sched_line"].map(coalesce_sched_line)
+    batch_col = recomputed["batch_key"].map(coalesce_batch_key)
+    recomputed_keys = set(zip(recomputed["po_no"], sched_col, batch_col))
     if key in recomputed_keys:
-        r = recomputed.set_index(
-            ["po_no", recomputed["sched_line"].map(coalesce_sched_line)]).loc[key]
+        r = recomputed.set_index(["po_no", sched_col, batch_col]).loc[key]
         assert not r["needs_human_review"]
         assert "王小明" in r["reasons"][0] and "確認交期 2026-10-01" in r["reasons"][0]
 
@@ -170,16 +176,16 @@ def test_today_confirmed_expander_lists_confirmation_with_status(tmp_path):
     不在清單的目前篩選條件裡。I1：這裡的「狀態」欄要標「生效中」——
     email_id 對得上目前這張單最新一封信，這筆確認還算數。
     """
-    po_no, sched_line, email_id = _first_needs_review_row()
+    po_no, sched_line, batch_key, email_id = _first_needs_review_row()
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=300).run()
     at.switch_page("views/actions.py").run()
     at.multiselect(key="action_priority_pick").set_value(["P1", "P2", "P3", "待查"])
     at.checkbox(key="action_only_review").set_value(True)
     at.run()
-    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{email_id}").set_value(
+    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value(
         __import__("datetime").date(2026, 10, 1))
-    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{email_id}").set_value("王小明")
-    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{email_id}").click()
+    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value("王小明")
+    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{batch_key}_{email_id}").click()
     at.run()
 
     at2 = AppTest.from_file(str(ROOT / "app.py"), default_timeout=300).run()
@@ -219,16 +225,16 @@ def test_confirmation_uses_toast_not_lost_success():
     I5：st.success 接著 st.rerun() 在同一次互動裡會被蓋掉，企劃看不到
     「已存成功」；改用 st.toast，跨這次 rerun 還留著。
     """
-    po_no, sched_line, email_id = _first_needs_review_row()
+    po_no, sched_line, batch_key, email_id = _first_needs_review_row()
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=300).run()
     at.switch_page("views/actions.py").run()
     at.multiselect(key="action_priority_pick").set_value(["P1", "P2", "P3", "待查"])
     at.checkbox(key="action_only_review").set_value(True)
     at.run()
-    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{email_id}").set_value(
+    at.get_by_key(f"confirm_date_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value(
         __import__("datetime").date(2026, 10, 1))
-    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{email_id}").set_value("王小明")
-    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{email_id}").click()
+    at.get_by_key(f"confirm_user_{po_no}_{sched_line}_{batch_key}_{email_id}").set_value("王小明")
+    at.get_by_key(f"confirm_submit_{po_no}_{sched_line}_{batch_key}_{email_id}").click()
     at.run()
     assert not at.exception, at.exception
     assert any("已登錄確認" in t.value for t in at.toast)

@@ -161,8 +161,10 @@ def to_planner_rows(df: pd.DataFrame) -> pd.DataFrame:
         "優先級": df["priority"],
         "預估缺料天數": _col(df, "gap_days").map(_int_or_blank),
         "採購單號": df["po_no"],
-        "批次": [batch_label(sl, tot) for sl, tot in
-                zip(_col(df, "sched_line"), _col(df, "sched_lines_total"))],
+        "批次": [batch_label(sl, tot, proposed_total=pt, proposed_index=pi)
+                for sl, tot, pi, pt in zip(
+                    _col(df, "sched_line"), _col(df, "sched_lines_total"),
+                    _col(df, "proposed_batch_index"), _col(df, "proposed_batch_total"))],
         "料號": _col(df, "material_id").map(triage._clean_str),
         "料別": _col(df, "category").map(_category_label),
         "供應商": _col(df, "supplier_name").map(triage._clean_str),
@@ -200,7 +202,9 @@ def followup_workbook(actions: pd.DataFrame, as_of: str) -> bytes:
         out.to_excel(writer, sheet_name="追料清單", index=False)
         ws = writer.sheets["追料清單"]
         ws.freeze_panes = "A2"
-        widths = {"優先級": 8, "預估缺料天數": 12, "採購單號": 12, "批次": 8, "料號": 16,
+        # 批次欄要容得下「1（供應商提議拆 2 批之 2）」這種較長的字樣
+        # （見 domain.batch_label），不能只按 ERP 已拆行的短版（「1」）估寬度。
+        widths = {"優先級": 8, "預估缺料天數": 12, "採購單號": 12, "批次": 22, "料號": 16,
                   "料別": 10, "供應商": 16, "數量": 10, "本批數量": 10, "新交期": 12,
                   "原承諾日": 12, "保守到料日": 12, "可投產日": 12, "需求日": 12,
                   "承諾強度": 10, "需人工確認": 10, "建議動作": 40, "理由": 50}

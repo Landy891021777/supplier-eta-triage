@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS gr_override_log (
     changed_by TEXT NOT NULL, changed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS eta_confirmation (
     confirm_id INTEGER PRIMARY KEY AUTOINCREMENT, po_no TEXT NOT NULL,
-    sched_line INTEGER, email_id TEXT NOT NULL, confirmed_date TEXT NOT NULL, note TEXT,
+    sched_line INTEGER, sched_batch_key TEXT, email_id TEXT NOT NULL,
+    confirmed_date TEXT NOT NULL, note TEXT,
     confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);
 """
 
@@ -60,14 +61,19 @@ def _connect(db: Path | str | None) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(_SCHEMA)
-    # 遷移：Task 3 之前建的 eta_confirmation 表沒有 sched_line 欄——
-    # CREATE TABLE IF NOT EXISTS 不會幫既有的表補欄位，得自己判斷、
-    # 用 ALTER TABLE 補上。舊資料的 sched_line 是 NULL，讀取時一律
-    # 當成第 1 行（見 load_confirmations()），跟「只有一筆排程行的單，
-    # 行為跟改版前完全一樣」這條相容規則一致。
+    # 遷移：CREATE TABLE IF NOT EXISTS 不會幫既有的表補欄位，得自己判斷、
+    # 用 ALTER TABLE 補上。
+    #   sched_line（Task 3 加）：舊資料是 NULL，讀取時一律當成第 1 行。
+    #   sched_batch_key（分批交貨收尾修正加）：舊資料也是 NULL，讀取時
+    #   一律當成空字串——空字串正是「這封信對這個排程行只有一筆記錄，
+    #   不需要區分批次」的正常情況，舊資料本來就都是這種情況。
+    # 兩者都跟「只有一筆排程行、沒有撞批的單，行為跟改版前完全一樣」
+    # 這條相容規則一致（見 load_confirmations()）。
     cols = {r[1] for r in con.execute("PRAGMA table_info(eta_confirmation)")}
     if "sched_line" not in cols:
         con.execute("ALTER TABLE eta_confirmation ADD COLUMN sched_line INTEGER")
+    if "sched_batch_key" not in cols:
+        con.execute("ALTER TABLE eta_confirmation ADD COLUMN sched_batch_key TEXT")
     return con
 
 
@@ -194,11 +200,16 @@ def _to_sched_line(sched_line) -> int:
     return n
 
 
-def _validate_confirmation(po_no, sched_line, email_id, confirmed_date, note, user
-                           ) -> tuple[str, int, str, str, str, str]:
+def _validate_confirmation(po_no, sched_line, batch_key, email_id, confirmed_date, note, user
+                           ) -> tuple[str, int, str, str, str, str, str]:
     if _blank(po_no):
         raise ValueError("請填寫採購單號")
     sched_line = _to_sched_line(sched_line)
+    # batch_key：多數確認是空字串（這封信對這個排程行只有一批，不需要
+    # 區分），不強制要求填——只有「供應商提議拆批」或「規則 4 保守退路
+    # 撞批」這兩種情況，呼叫端（ui_state.submit_confirmation）才會帶一個
+    # 非空值進來。這裡只負責正規化成字串，不驗證格式。
+    batch_key = "" if batch_key is None else str(batch_key).strip()
     if _blank(email_id):
         raise ValueError("請填寫信件編號")
     d = str(confirmed_date or "").strip()
@@ -210,12 +221,13 @@ def _validate_confirmation(po_no, sched_line, email_id, confirmed_date, note, us
         raise ValueError("請填寫確認後的交期日期（YYYY-MM-DD）") from None
     if _blank(user):
         raise ValueError("請填寫姓名")
-    return (str(po_no).strip(), sched_line, str(email_id).strip(), d,
+    return (str(po_no).strip(), sched_line, batch_key, str(email_id).strip(), d,
             str(note or "").strip(), str(user).strip())
 
 
-def confirm_eta(db, po_no: str, sched_line: int, email_id: str, confirmed_date: str,
-                note: str, user: str, *, now: str | None = None) -> None:
+def confirm_eta(db, po_no: str, sched_line: int, batch_key: str, email_id: str,
+                confirmed_date: str, note: str, user: str, *,
+                now: str | None = None) -> None:
     """
     登錄企劃向供應商確認到的交期。
 
@@ -227,40 +239,53 @@ def confirm_eta(db, po_no: str, sched_line: int, email_id: str, confirmed_date: 
     確認了其中一批，套用時要跟 po_no 一起當鍵（見 pipeline.retriage()），
     不能讓一批的確認蓋掉另一批。
 
+    batch_key：同一個排程行如果同一封信被拆出不只一筆記錄（供應商提議
+    拆批、或工具自己猜到同一行撞在一起，見 pipeline._resolve_record_batches），
+    光靠 (po_no, sched_line) 分不出企劃是在確認哪一筆——兩筆記錄的
+    email_id 完全相同（本來就是同一封信），如果套用條件只看 email_id
+    對不對得上，確認其中一批會連帶把另一批也判成「已確認」，把一個沒有
+    依據的日期套到不相干的那一批上。多數情況（同一行只有一筆記錄）
+    batch_key 是空字串，行為跟這個機制出現以前完全一樣。
+
     email_id 必須跟著存：套用時要求 email_id 對得上目前這封信，
     否則供應商隔天又來一封改口的新信，舊確認會誤蓋掉新資訊
     （見 pipeline.retriage()）。
     """
-    po_no, sched_line, email_id, confirmed_date, note, user = _validate_confirmation(
-        po_no, sched_line, email_id, confirmed_date, note, user)
+    po_no, sched_line, batch_key, email_id, confirmed_date, note, user = _validate_confirmation(
+        po_no, sched_line, batch_key, email_id, confirmed_date, note, user)
     ts = _now(now)
     with closing(_connect(db)) as con:
         con.execute(
-            "INSERT INTO eta_confirmation (po_no, sched_line, email_id, confirmed_date, note,"
-            " confirmed_by, confirmed_at) VALUES (?,?,?,?,?,?,?)",
-            (po_no, sched_line, email_id, confirmed_date, note, user, ts))
+            "INSERT INTO eta_confirmation (po_no, sched_line, sched_batch_key, email_id,"
+            " confirmed_date, note, confirmed_by, confirmed_at) VALUES (?,?,?,?,?,?,?,?)",
+            (po_no, sched_line, batch_key, email_id, confirmed_date, note, user, ts))
         con.commit()
 
 
-def load_confirmations(db: Path | str | None = None) -> dict[tuple[str, int], dict]:
+def load_confirmations(db: Path | str | None = None) -> dict[tuple[str, int, str], dict]:
     """
     每張單的每一批只取最新一筆確認（confirm_id 最大）。
 
-    鍵是 (po_no, sched_line)，不是單純 po_no——分批交貨時每一批各自
-    追蹤，確認也要能各自套用（見 pipeline.retriage()）。sched_line 是
-    NULL 的舊資料（Task 3 以前存的，那時整張單只有一批）一律視為第 1
-    行，GROUP BY 用 COALESCE 讓舊資料跟新資料的「第 1 行」是同一組。
+    鍵是 (po_no, sched_line, batch_key)，不是單純 po_no——分批交貨時每
+    一批各自追蹤，確認也要能各自套用（見 pipeline.retriage()）。
+    sched_line 是 NULL 的舊資料（Task 3 以前存的，那時整張單只有一批）
+    一律視為第 1 行；sched_batch_key 是 NULL 的舊資料（這個欄位出現以前
+    存的，那時同一個排程行不會有一封信對到兩筆記錄的情況）一律視為
+    空字串。GROUP BY 用 COALESCE 讓舊資料跟新資料的「第 1 行、沒有撞批」
+    是同一組。
     """
     with closing(_connect(db)) as con:
         rows = con.execute(
             "SELECT * FROM eta_confirmation WHERE confirm_id IN "
             "(SELECT MAX(confirm_id) FROM eta_confirmation "
-            " GROUP BY po_no, COALESCE(sched_line, 1))").fetchall()
-        result: dict[tuple[str, int], dict] = {}
+            " GROUP BY po_no, COALESCE(sched_line, 1), COALESCE(sched_batch_key, ''))"
+        ).fetchall()
+        result: dict[tuple[str, int, str], dict] = {}
         for r in rows:
             d = dict(r)
             d["sched_line"] = 1 if d.get("sched_line") is None else int(d["sched_line"])
-            result[(d["po_no"], d["sched_line"])] = d
+            d["sched_batch_key"] = d.get("sched_batch_key") or ""
+            result[(d["po_no"], d["sched_line"], d["sched_batch_key"])] = d
         return result
 
 

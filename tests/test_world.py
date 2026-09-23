@@ -145,24 +145,30 @@ def test_about_20_percent_of_generated_pos_split_into_two_schedule_lines():
             assert p["schedule"][0] == (1, p["committed_date"], p["qty"]), p["po_no"]
 
 
-def test_fixed_po_04188_is_split_matching_hc010():
+def test_fixed_po_04188_is_a_single_unsplit_line():
     """
-    手寫案例 HC-010 描述 PO-2026-04188（TG-Cu-90，共 20 片）分批交貨：
-    8 片照原日期 2026-09-30、12 片延到 2026-11-15。這筆是固定資料，
-    不能靠隨機決定是否分批，否則信件內容跟 ERP 資料會對不上。
+    手寫案例 HC-010 描述供應商「提議」把 PO-2026-04188（TG-Cu-90，共 20
+    片）拆成兩批：8 片照原日期 2026-09-30、12 片延到 2026-11-15。ERP 那
+    邊必須還是**單一**排程行（20 片 @ 2026-09-30，尚未拆行）——如果 ERP
+    預先就拆好兩行，供應商的信就只是在複述 ERP 已經知道的事，兩批新
+    日期會分別對到既有排程行的 committed_date，觸發對位後都判成
+    no_change，12 片的延遲就完全看不出來了（決策 19 的修正）。
     """
     _, _, pos = _world()
     po = next(p for p in pos if p["po_no"] == "PO-2026-04188")
-    assert po["schedule"] == [(1, "2026-09-30", 8), (2, "2026-11-15", 12)]
+    assert po["schedule"] == [(1, "2026-09-30", 20)]
 
 
 def test_other_fixed_pos_are_not_split():
     """
-    FIXED_POS 其餘的單依賴固定的單一承諾日（多處展示與規則測試以此為前提），
-    不該被隨機拆批邏輯誤觸，只有明確標記 split 的那一筆才會分批。
+    FIXED_POS 全部的單依賴固定的單一承諾日（多處展示與規則測試以此為前提），
+    不該被隨機拆批邏輯誤觸，只有明確標記 split 的固定單才會分批——
+    目前 FIXED_POS 裡沒有任何一筆標記 split（PO-2026-04188 的分批是
+    HC-010 信中「提議」的，不是 ERP 既有的排程，見
+    test_fixed_po_04188_is_a_single_unsplit_line）。
     """
     _, _, pos = _world()
     fixed = {p[0]: p for p in generate_data.FIXED_POS}
     for po in pos:
-        if po["po_no"] in fixed and po["po_no"] != "PO-2026-04188":
+        if po["po_no"] in fixed:
             assert len(po["schedule"]) == 1, po["po_no"]

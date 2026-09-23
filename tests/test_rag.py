@@ -176,14 +176,29 @@ def test_pinning_preserves_question_order(retriever):
 
 def test_pinning_pins_every_batch_card_of_a_split_po(retriever):
     """
-    分批交貨的迴歸測試：PO-2026-04188 拆成兩批，兩批各自一張卡
-    （PO:PO-2026-04188#1、PO:PO-2026-04188#2）。問句只提到單號，
-    看不出使用者要問哪一批，兩張卡都要被釘選出來——只釘到其中一批，
-    企劃會看不到另一批「準時／延遲」的事實（見決策 19）。
+    分批交貨的迴歸測試：ERP 裡真的拆成兩批的單，兩批各自一張卡
+    （PO:{po_no}#1、PO:{po_no}#2）。問句只提到單號，看不出使用者要問
+    哪一批，兩張卡都要被釘選出來——只釘到其中一批，企劃會看不到另一批
+    「準時／延遲」的事實（見決策 19）。
+
+    不再寫死 PO-2026-04188：分批交貨收尾修正把那張單改回 ERP 單一排程
+    行（HC-010 的信是供應商「提議」拆批，不是 ERP 已經拆好，若 ERP 預先
+    拆好，兩批的日期會各自等於既有排程行的 committed_date，對位後都判成
+    no_change，延遲的那批就憑空消失——見 test_pipeline_triage.py 的
+    HC-010 端到端測試）。改成從資料裡動態找一張約 20% 隨機分批機制真的
+    拆出來的單，測試才不會因為 PO-2026-04188 不再是固定分批範例而失效。
     """
-    ids = [h.card.card_id for h in retriever.search("PO-2026-04188 目前狀況如何", k=8)]
-    assert "PO:PO-2026-04188#1" in ids
-    assert "PO:PO-2026-04188#2" in ids
+    split_po_nos = sorted({
+        c.card_id.split("#", 1)[0].split(":", 1)[1]
+        for c in retriever.cards
+        if c.card_id.startswith("PO:") and "#" in c.card_id
+    })
+    assert split_po_nos, "資料裡沒有任何 ERP 已拆批的單，測試前提不成立"
+    po_no = split_po_nos[0]
+
+    ids = [h.card.card_id for h in retriever.search(f"{po_no} 目前狀況如何", k=8)]
+    assert f"PO:{po_no}#1" in ids
+    assert f"PO:{po_no}#2" in ids
 
 
 def test_pinning_can_be_disabled_for_evaluation(retriever):

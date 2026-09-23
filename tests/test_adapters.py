@@ -298,19 +298,22 @@ def test_csv_and_sqlite_agree_on_po_and_schedule_line_set(new_world_sources):
     assert a == b
 
 
-def test_hc010_po_is_split_8_and_12_in_both_sources(new_world_sources):
+def test_hc010_po_is_a_single_unsplit_line_in_both_sources(new_world_sources):
     """
-    手寫案例 HC-010 依賴 PO-2026-04188 分批交貨（8 片照原日期 2026-09-30、
-    12 片延到 2026-11-15）；這是固定資料，兩種來源都必須看得到兩批，
-    否則信件內容跟 ERP 資料會對不上，展示時一眼穿幫。
+    手寫案例 HC-010 依賴 PO-2026-04188 在 ERP 裡是**單一**排程行
+    （20 片 @ 2026-09-30，尚未拆行）——HC-010 的信是供應商「提議」把這
+    一行拆成 8 片照原日期、12 片延到 2026-11-15，不是複述 ERP 已經拆好
+    的排程。如果 ERP 預先就拆成兩行，兩批新日期會剛好等於各自排程行的
+    committed_date，觸發對位後兩批都判成 no_change，延遲的 12 片就
+    憑空消失了（見決策 19 的修正）。這是固定資料，兩種來源都要一致。
     """
     csv_src, db_src = new_world_sources
     for src in (csv_src, db_src):
         rows = (src.purchase_orders()
                 .query("po_no == 'PO-2026-04188'")
                 .sort_values("sched_line"))
-        assert list(rows["sched_line"]) == [1, 2], src.name
-        assert list(rows["sched_qty"]) == [8, 12], src.name
+        assert list(rows["sched_line"]) == [1], src.name
+        assert list(rows["sched_qty"]) == [20], src.name
         assert list(rows["committed_date"].astype(str).str[:10]) == [
-            "2026-09-30", "2026-11-15"], src.name
+            "2026-09-30"], src.name
         assert (rows["qty"] == 20).all(), src.name

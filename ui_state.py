@@ -263,8 +263,8 @@ def outcomes_df():
     return outcomes
 
 
-def submit_confirmation(po_no: str, sched_line: int, email_id: str, confirmed_date: str,
-                        note: str, user: str, *, db=None,
+def submit_confirmation(po_no: str, sched_line: int, batch_key: str, email_id: str,
+                        confirmed_date: str, note: str, user: str, *, db=None,
                         now: str | None = None) -> tuple[bool, str]:
     """
     包一層給表單 callback／測試共用。
@@ -276,10 +276,14 @@ def submit_confirmation(po_no: str, sched_line: int, email_id: str, confirmed_da
     tests/test_app_pages.py 的說明）。
 
     sched_line：確認的是這張單的哪一批，跟著 po_no 一起當鍵。
+    batch_key：同一個排程行如果同一封信講了不只一批（供應商提議拆批、
+    或工具猜到同一行撞在一起），要跟著一起當鍵，否則確認其中一批會
+    連帶套用到另一批（見 planner_settings.confirm_eta 的說明）。多數
+    情況是空字串。
     """
     try:
-        planner_settings.confirm_eta(db, po_no, sched_line, email_id, confirmed_date,
-                                     note, user, now=now)
+        planner_settings.confirm_eta(db, po_no, sched_line, batch_key, email_id,
+                                     confirmed_date, note, user, now=now)
     except ValueError as e:
         return False, str(e)
     return True, ""

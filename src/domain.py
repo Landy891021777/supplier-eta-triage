@@ -151,14 +151,57 @@ def coalesce_sched_line(v) -> int:
         return 1
 
 
-def batch_label(sched_line, total_lines) -> str:
+def coalesce_batch_key(v) -> str:
+    """
+    把批次識別鍵正規化成字串：None／NaN（正常情況——大多數列同一封信
+    對同一個排程行只有一筆記錄，不需要區分）一律當成空字串 ""。
+
+    「批次識別鍵」（batch_key）是給同一封信裡對到同一個排程行的好幾筆
+    記錄用的區分依據（見 pipeline._resolve_record_batches：供應商提議
+    把一筆還沒拆行的排程行拆成好幾批時，或規則 4 的保守退路剛好讓兩筆
+    記錄都落到同一行時），不能只靠 (po_no, sched_line) 去重／查確認
+    紀錄，否則後面那筆會悄悄蓋掉前面那筆。
+    """
+    if v is None:
+        return ""
+    try:
+        if v != v:  # NaN
+            return ""
+    except TypeError:
+        pass
+    return str(v)
+
+
+def batch_label(sched_line, total_lines, *, proposed_total=None, proposed_index=None) -> str:
     """
     「批次」欄的顯示值：只有一筆排程行（沒有分批）時顯示「—」，
-    分批交貨時顯示第幾批（sched_line）。
+    ERP 已經拆好排程行時顯示第幾批（sched_line）。
+
+    proposed_total／proposed_index：這一列是不是「供應商提議拆批，但
+    ERP 那筆排程行還沒真的拆開」（見 pipeline._resolve_record_batches）。
+    這種情況 total_lines 仍然是 1（ERP 沒變），只看 total_lines 會顯示
+    「—」，把「供應商其實講了不只一批」這件事藏起來——批次欄本來就是
+    要讓企劃一眼看出「這是哪一批」，這種情況要用不同的字樣講清楚
+    「這是供應商提議的批次，不是 ERP 已經拆好的批次」，不能跟 ERP
+    已經拆好的批次用同一種顯示方式，那會讓企劃誤以為系統已經拆行了。
 
     畫面（views/actions.py）與匯出（exports.py）都要顯示同一件事，
     只寫一份，避免哪天改了規則卻只改到一邊。
     """
+    try:
+        pt = int(proposed_total) if proposed_total is not None else 0
+    except (TypeError, ValueError):
+        pt = 0
+    if pt > 1:
+        try:
+            pi = int(proposed_index)
+        except (TypeError, ValueError):
+            pi = "?"
+        try:
+            line = int(sched_line)
+        except (TypeError, ValueError):
+            line = sched_line
+        return f"{line}（供應商提議拆 {pt} 批之 {pi}）"
     try:
         total = int(total_lines)
     except (TypeError, ValueError):
