@@ -35,6 +35,16 @@ CONFIRM_LOG_RENAME = {"confirmed_at": "確認時間", "confirmed_date": "確認�
 ctx = ui_state.context()
 result, actions, stats = ctx["result"], ctx["actions"], ctx["stats"]
 
+# actions 本身沒有 base_uom（那是料號主檔的欄位，不是分級要用的欄位，
+# run()／retriage() 沒理由帶著它）；CSV 與 Excel 兩個匯出都要顯示
+# 「數量＋單位」，在這裡併入一次，兩邊共用，不動 actions 本身。
+# 用 .map() 不用 .merge()：merge 會把索引重設成 0..n-1，
+# 底下 CSV 匯出要用 view.index 對回 actions_for_export，索引對不上
+# 會整批拿錯列；.map() 是逐元素查表，索引原封不動留著。
+_base_uom_by_material = ui_state.materials_df().set_index("material_id")["base_uom"]
+actions_for_export = actions.assign(
+    base_uom=actions["material_id"].map(_base_uom_by_material))
+
 # ---------------- 標題與摘要 ----------------
 st.title("📦 供應鏈 AI 工具：交期風險優先排序")
 st.caption(
@@ -48,6 +58,36 @@ c2.metric("自動濾除（確認無變更）", stats["no_change_filtered"])
 c3.metric("進入行動清單", stats["actionable"])
 c4.metric("🔴 今天要處理 P1", stats["p1"])
 c5.metric("⚠️ 需人工確認", int(actions["needs_human_review"].sum()))
+st.caption("💡 勾選下方「只看需人工確認」可逐張登錄確認交期。")
+
+# ==================== 今日已確認 ====================
+# 企劃登錄過的確認，不管那張單現在還在不在清單裡（例如確認日期剛好等於
+# 原承諾日，會被判為 no_change 而從清單消失——見 pipeline.retriage 的
+# 說明，這是設計上的預期行為，不是 bug），都要有地方查得到「我今天
+# 確認過哪些單」，不能登錄完就石沉大海。
+confirmed_map = planner_settings.load_confirmations()
+with st.expander(f"📌 今日已確認（{len(confirmed_map)}）"):
+    if not confirmed_map:
+        st.caption("目前沒有登錄過的確認交期。")
+    else:
+        current_email = ui_state.current_email_by_po(result)
+        in_list = set(actions["po_no"])
+        conf_rows = [{
+            "採購單號": po,
+            "確認後交期": c.get("confirmed_date", ""),
+            "確認人": c.get("confirmed_by", ""),
+            "確認時間": c.get("confirmed_at", ""),
+            "備註": c.get("note") or "",
+            # 生效中／已被新信取代：跟這張單目前（去重後最新一封）的
+            # email_id 比對，對不上代表供應商後來又寄過新信，這筆確認
+            # 已經作廢（見 pipeline.retriage 的說明）。
+            "狀態": ("生效中" if current_email.get(po) == c.get("email_id")
+                    else "已被新信取代"),
+            "仍在行動清單中": "是" if po in in_list else "否",
+        } for po, c in confirmed_map.items()]
+        st.dataframe(
+            pd.DataFrame(conf_rows).sort_values("確認時間", ascending=False),
+            width="stretch", hide_index=True)
 
 st.subheader("今日行動清單")
 st.caption("依預估缺料天數排序（缺越多天越前面）。展開任一筆可看到為什麼、建議動作，以及回信草稿。")
@@ -76,6 +116,7 @@ else:
                        "commitment_strength", "needs_human_review"]].copy()
     display_df["commitment_strength"] = display_df["commitment_strength"].map(
         lambda v: COMMITMENT_LABEL_ZH.get(v, v))
+    display_df["needs_human_review"] = display_df["needs_human_review"].map({True: "是", False: "否"})
     st.dataframe(
         display_df.rename(columns={
             "priority": "優先級", "gap_days": "預估缺料天數", "conservative_eta": "保守到料日",
@@ -87,10 +128,14 @@ else:
 
     st.divider()
     st.markdown("#### 逐案展開")
-    # 一次撈全部確認紀錄，展開時用 po_no 篩：12 筆展開項迴圈裡各自查一次
-    # 資料庫沒必要，資料量也不大，不差這一次查詢。
+    # 只看需人工確認時，這份清單就是企劃今天真正要逐張處理的工作清單，
+    # 不該被硬性的 12 筆上限擋住看不到、也登錄不到後面幾張的確認表單
+    # （I4）；平常瀏覽全部案件才限制 12 筆，避免一次展開太多拖慢畫面。
+    rows_to_show = view if only_review else view.head(12)
+    # 一次撈全部確認紀錄，展開時用 po_no 篩：迴圈裡各自查一次資料庫
+    # 沒必要，資料量也不大，不差這一次查詢。
     all_confirm_log = planner_settings.confirmation_log()
-    for _, row in view.head(12).iterrows():
+    for _, row in rows_to_show.iterrows():
         icon = ui_state.PRIORITY_COLOR.get(row["priority"], "⚪")
         flag = " ⚠️ 需人工確認" if row["needs_human_review"] else ""
         header = (f"{icon} **{row['priority']}**　{row['po_no']}　"
@@ -106,38 +151,49 @@ else:
                     st.info(row["note"])
 
                 if row["needs_human_review"]:
-                    st.warning(
-                        "**此筆不會覆寫系統承諾日。**\n\n"
-                        "原因：供應商未明確承諾、或解析信心不足。"
-                        "交期資料錯誤會連動整條下游排程，"
-                        "因此寫回 ERP 必須由人確認後執行。")
+                    if not row.get("matched", True):
+                        # 對不到 PO 主檔的列沒有原承諾日可比對，登錄確認
+                        # 也不會被 retriage 套用（見 pipeline.retriage 的
+                        # 說明）——與其讓企劃填一個永遠不會生效的表單，
+                        # 不如直接說清楚該先做什麼。
+                        st.warning("信中的採購單號對不到系統，請先確認單號。")
+                    else:
+                        st.warning(
+                            "**此筆不會覆寫系統承諾日。**\n\n"
+                            "原因：供應商未明確承諾、或解析信心不足。"
+                            "交期資料錯誤會連動整條下游排程，"
+                            "因此寫回 ERP 必須由人確認後執行。")
 
-                    po_no, email_id = row["po_no"], row["email_id"]
-                    # 預設值：信中新交期能解析就用它，不能就退回原承諾日，
-                    # 兩個都解析不出來（理論上不會發生，防禦用）才用今天。
-                    default_date = (triage._d(row.get("new_eta"))
-                                    or triage._d(row.get("committed_date"))
-                                    or date.today())
-                    with st.form(key=f"confirm-{po_no}-{email_id}"):
-                        st.caption(
-                            "向供應商要到確切日期後在這裡登錄，清單會改用這個日期重算。"
-                            "**這裡只記錄在工具內，不會寫回 ERP**；"
-                            "請依公司流程更新交貨排程行。")
-                        c_date = st.date_input("確認後的交期", value=default_date,
-                                               key=f"confirm_date_{po_no}_{email_id}")
-                        c_note = st.text_input("備註（選填）",
-                                               key=f"confirm_note_{po_no}_{email_id}")
-                        c_user = st.text_input("姓名（必填）",
-                                               key=f"confirm_user_{po_no}_{email_id}")
-                        if st.form_submit_button(
-                                "登錄確認", key=f"confirm_submit_{po_no}_{email_id}"):
-                            ok, msg = ui_state.submit_confirmation(
-                                po_no, email_id, c_date.isoformat(), c_note, c_user)
-                            if ok:
-                                st.success("已登錄確認，清單將改用這個日期重算。")
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                        po_no, email_id = row["po_no"], row["email_id"]
+                        # 預設值：信中新交期能解析就用它，不能就退回原承諾日，
+                        # 兩個都解析不出來（理論上不會發生，防禦用）才用今天。
+                        default_date = (triage._d(row.get("new_eta"))
+                                        or triage._d(row.get("committed_date"))
+                                        or date.today())
+                        with st.form(key=f"confirm-{po_no}-{email_id}"):
+                            st.caption(
+                                "向供應商要到確切日期後在這裡登錄，清單會改用這個日期"
+                                "重算。**這裡只記錄在工具內，不會寫回 ERP**；"
+                                "請依公司流程更新交貨排程行。")
+                            c_date = st.date_input("確認後的交期", value=default_date,
+                                                   key=f"confirm_date_{po_no}_{email_id}")
+                            c_note = st.text_input("備註（選填）",
+                                                   key=f"confirm_note_{po_no}_{email_id}")
+                            c_user = st.text_input("姓名（必填）",
+                                                   key=f"confirm_user_{po_no}_{email_id}")
+                            if st.form_submit_button(
+                                    "登錄確認", key=f"confirm_submit_{po_no}_{email_id}"):
+                                ok, msg = ui_state.submit_confirmation(
+                                    po_no, email_id, c_date.isoformat(), c_note, c_user)
+                                if ok:
+                                    # st.success 接著 st.rerun() 會來不及顯示就被
+                                    # 蓋掉；st.toast 設計上會跨這一次 rerun 留著，
+                                    # 企劃才看得到「有登錄成功」。
+                                    st.toast("已登錄確認，清單將改用這個日期重算。",
+                                            icon="✅")
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
                 # 已確認的單，理由第一條已經寫明誰、哪天確認（見 pipeline.retriage）；
                 # 這裡另外列出完整確認歷史（新到舊），即使這張單現在已經不再
@@ -147,8 +203,14 @@ else:
                     st.markdown("**這張單的確認紀錄**")
                     log_df = pd.DataFrame(
                         sorted(po_log, key=lambda c: c["confirm_id"], reverse=True))
+                    # 狀態：這筆確認的 email_id 是不是這張單目前最新一封信——
+                    # 不是的話代表供應商後來又寄過新信，這筆確認已經作廢
+                    # （跟「今日已確認」那個 expander 用同一套判斷）。
+                    log_df["狀態"] = log_df["email_id"].map(
+                        lambda e: "生效中" if e == row["email_id"] else "已被新信取代")
                     st.dataframe(
-                        log_df[["confirmed_at", "confirmed_date", "note", "confirmed_by"]]
+                        log_df[["confirmed_at", "confirmed_date", "note",
+                               "confirmed_by", "狀態"]]
                         .rename(columns=CONFIRM_LOG_RENAME),
                         width="stretch", hide_index=True)
 
@@ -178,26 +240,17 @@ else:
     with dl1:
         st.download_button(
             "⬇️ 匯出行動清單 CSV",
-            view.assign(
-                reasons=view["reasons"].map(
-                    lambda v: "；".join(v) if isinstance(v, list) else ""),
-                actions=view["actions"].map(
-                    lambda v: "；".join(v) if isinstance(v, list) else ""))
-                .to_csv(index=False).encode("utf-8-sig"),
+            exports.to_planner_rows(
+                actions_for_export.loc[view.index]
+            ).to_csv(index=False).encode("utf-8-sig"),
             file_name="行動清單.csv", mime="text/csv")
     with dl2:
         # 內容取自篩選前的完整清單（P1、P2、待查）——給明天早上追料、或帶去
         # 缺料檢討會用，不該因為使用者當下的篩選條件漏掉某些單。
-        # actions 本身沒有 base_uom（那是料號主檔的欄位，不是分級要用的
-        # 欄位，run()／retriage() 沒有理由帶著它），只有匯出要顯示「數量
-        # ＋單位」時才需要，因此只在這裡併入，不動 actions／view 本身。
         as_of = str(result["as_of"])
-        export_df = actions.merge(
-            ui_state.materials_df()[["material_id", "base_uom"]],
-            on="material_id", how="left")
         st.download_button(
             "⬇️ 匯出明日追料清單（Excel）",
-            exports.followup_workbook(export_df, as_of),
+            exports.followup_workbook(actions_for_export, as_of),
             file_name=f"追料清單_{as_of}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.caption("給明天早上追料、或帶去缺料檢討會用。")

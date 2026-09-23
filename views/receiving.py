@@ -66,7 +66,9 @@ with st.form("gr_override_form", clear_on_submit=True):
         except ValueError as e:
             st.error(str(e))
         else:
-            st.success(f"已更新 {sel_material} 的收貨處理天數為 {int(sel_days)} 天。")
+            # st.success 接著 st.rerun() 會來不及顯示就被蓋掉；st.toast
+            # 設計上會跨這一次 rerun 留著，企劃才看得到「有存成功」。
+            st.toast(f"已更新 {sel_material} 的收貨處理天數為 {int(sel_days)} 天。", icon="✅")
             st.rerun()
 
 if overrides:
@@ -86,7 +88,7 @@ if overrides:
             except ValueError as e:
                 st.error(str(e))
             else:
-                st.success(f"{clr_material} 已恢復為料別預設天數。")
+                st.toast(f"{clr_material} 已恢復為料別預設天數。", icon="✅")
                 st.rerun()
 
 st.markdown("#### 調整紀錄")

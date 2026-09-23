@@ -131,8 +131,27 @@ def context() -> dict:
     actions = pipeline.retriage(result.get("all", result["actions"]), gr_map, cfg["triage"],
                                 confirmations=confirmations)
 
+    # ---------------- 統計：跟套用覆寫／確認之後的 actions 對得上 ----------------
+    # result["stats"]["no_change_filtered"] 是 run() 當下（還沒套用任何
+    # 覆寫或確認）算出來的「供應商確認照原計畫，被 retriage 濾掉」筆數，
+    # 是個寫死的舊數字。企劃登錄一筆確認交期，如果確認後的日期剛好等於
+    # 原承諾日（change_type 重判成 no_change），那張單會從 actions 消失
+    # （這是設計上「fine」的行為，見 planner-ui 計畫 I2）——但首頁
+    # 「自動濾除」這個指標如果還是用 run() 當下的舊數字，就不會反映這件事，
+    # 企劃會看到「進入行動清單」的數字對不上「收到信件」與「自動濾除」
+    # 兩者相加。這裡改成：用同一份 all_df，比較「套覆寫／確認前有幾張
+    # matched 的單」與「套完之後 actions 裡還有幾張 matched 的單」，
+    # 兩者的差就是這一輪 retriage 濾掉的張數——永遠跟 actions 對得上。
+    # 未對到主檔（matched=False）的列不算在「自動濾除」裡：它們本來就會
+    # 原封不動地留在 actions（見 retriage 的說明），從不會被濾掉。
+    all_df = result.get("all", actions)
+    matched_before = int(all_df["matched"].sum()) if "matched" in all_df.columns else 0
+    matched_after = int(actions["matched"].sum()) if "matched" in actions.columns else 0
+    no_change_filtered = max(matched_before - matched_after, 0)
+
     stats = dict(result["stats"])
     stats.update(
+        no_change_filtered=no_change_filtered,
         actionable=len(actions),
         p1=int((actions["priority"] == "P1").sum()),
         p2=int((actions["priority"] == "P2").sum()),
@@ -141,6 +160,33 @@ def context() -> dict:
 
     return dict(result=result, actions=actions, stats=stats, cfg=cfg,
                provider=provider, use_llm=use_llm)
+
+
+def current_email_by_po(result: dict) -> dict:
+    """
+    每張單「目前」對應的信件編號（result["all"] 去重後、每個 po_no 唯一
+    的最新一封信）。
+
+    給確認紀錄判斷「生效中」還是「已被新信取代」用：一筆確認紀錄的
+    email_id 如果跟這張單目前的 email_id 不同，就代表供應商後來又寄過
+    新信，這筆確認已經作廢（見 pipeline.retriage() 的說明）。
+    """
+    all_df = result.get("all")
+    if all_df is None or "email_id" not in all_df.columns:
+        return {}
+    return all_df.set_index("po_no")["email_id"].to_dict()
+
+
+@st.cache_data(show_spinner=False)
+def open_pos_df():
+    """
+    在途（未收貨）採購單的供應商與承諾日，供「供應商月度績效」把逾期
+    未收的單也算進去用（見 exports.supplier_monthly 的 open_pos 參數）。
+
+    直接重用 adapters 的 purchase_orders()：那本來就是「還沒收貨」的
+    在途單（SQL 版本有 `WHERE g.gr_no IS NULL`），不必另外查一次。
+    """
+    return pipeline.get_data_source(pipeline.load_config()).purchase_orders()
 
 
 def llm_budget_left() -> int:
@@ -172,6 +218,18 @@ def reschedule_reliability():
 @st.cache_data(show_spinner=False)
 def materials_df():
     return pipeline.get_data_source(pipeline.load_config()).materials()
+
+
+@st.cache_data(show_spinner=False)
+def supplier_name_map() -> dict:
+    """
+    supplier_id -> supplier_name 的純顯示用查表。
+
+    跟 outcomes_df() 分開：有些畫面（例如「各供應商歷史表現」）只需要
+    把代號換成名字，不需要整張歷史收貨紀錄，沒理由背著那張表。
+    """
+    sups = pipeline.get_data_source(pipeline.load_config()).suppliers()
+    return sups.set_index("supplier_id")["supplier_name"].to_dict()
 
 
 @st.cache_data(show_spinner=False)
