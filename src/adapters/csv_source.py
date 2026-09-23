@@ -11,6 +11,10 @@ CSV 版本的 `reschedule_count`、`has_qualified_second_source`、
 
 換句話說：**CSV 版本跳過了整合工作中最花時間的那一段。**
 展示很方便，但不該假裝那就是接 ERP 的樣子。
+
+`po_master.csv` 是「每筆交貨排程行一列」，不是「每張單一列」：
+分批交貨時同一個 `po_no` 會有兩列，靠 `sched_line` 區分批次、
+`sched_qty` 是該批的數量（`qty` 仍是項次總量）。
 """
 from __future__ import annotations
 

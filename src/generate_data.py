@@ -200,20 +200,27 @@ def build_materials(n: int) -> list[dict]:
 #   上游延一天的代價會放大很多倍 —— 因為要動的不只這一張單。
 FIXED_POS = [
     # (po_no, material_id, supplier_id, qty, committed, need_date,
-    #  downstream_scheduled, reschedule_count, share_of_demand)
-    ("PO-2026-04417", "SW-300-E-3390", "SUP-W01", 3000, "2026-10-15", "2026-10-22", True,  2, 0.80),
-    ("PO-2026-04452", "SW-300-P-2210", "SUP-W01", 2000, "2026-10-20", "2026-11-10", False, 0, 0.35),
-    ("PO-2026-04390", "SW-300-P-2210", "SUP-W02", 2500, "2026-09-25", "2026-10-05", True,  1, 0.55),
-    ("PO-2026-04391", "SW-300-P-2210", "SUP-W02", 2500, "2026-10-02", "2026-10-30", False, 0, 0.45),
-    ("PO-2026-04205", "PR-ArF-1088",   "SUP-R02", 120,  "2026-09-10", "2026-09-18", True,  3, 0.95),
-    ("PO-2026-04501", "GS-NF3-01",     "SUP-G02", 60,   "2026-09-30", "2026-10-25", False, 0, 0.30),
-    ("PO-2026-04333", "CH-HF-05",      "SUP-C02", 80,   "2026-09-20", "2026-09-28", True,  1, 0.60),
-    ("PO-2026-04466", "SW-300-P-2211", "SUP-W02", 1800, "2026-09-30", "2026-10-20", False, 0, 0.40),
-    ("PO-2026-04120", "MSK-N7-XR3390", "SUP-M01", 1,    "2026-09-12", "2026-09-16", True,  0, 1.00),
-    ("PO-2026-04277", "TG-Ti-77",      "SUP-T01", 20,   "2026-10-05", "2026-10-28", False, 0, 0.50),
-    ("PO-2026-04278", "TG-Ti-77",      "SUP-T01", 20,   "2026-10-10", "2026-10-18", True,  2, 0.70),
-    ("PO-2026-04279", "TG-Ta-79",      "SUP-T01", 30,   "2026-10-12", "2026-11-05", False, 3, 0.85),
-    ("PO-2026-04188", "TG-Cu-90",      "SUP-T02", 20,   "2026-09-30", "2026-10-08", True,  1, 0.75),
+    #  downstream_scheduled, reschedule_count, share_of_demand, split)
+    #
+    # split：固定的分批交貨，None 表示不分批。有值時是
+    # (第二批交期, 第一批數量, 第二批數量)，兩批數量須相加等於 qty。
+    # 只有明確給值的這一筆會分批 —— 其餘固定單依賴單一承諾日展示與測試，
+    # 不能被隨機拆批邏輯誤觸。
+    ("PO-2026-04417", "SW-300-E-3390", "SUP-W01", 3000, "2026-10-15", "2026-10-22", True,  2, 0.80, None),
+    ("PO-2026-04452", "SW-300-P-2210", "SUP-W01", 2000, "2026-10-20", "2026-11-10", False, 0, 0.35, None),
+    ("PO-2026-04390", "SW-300-P-2210", "SUP-W02", 2500, "2026-09-25", "2026-10-05", True,  1, 0.55, None),
+    ("PO-2026-04391", "SW-300-P-2210", "SUP-W02", 2500, "2026-10-02", "2026-10-30", False, 0, 0.45, None),
+    ("PO-2026-04205", "PR-ArF-1088",   "SUP-R02", 120,  "2026-09-10", "2026-09-18", True,  3, 0.95, None),
+    ("PO-2026-04501", "GS-NF3-01",     "SUP-G02", 60,   "2026-09-30", "2026-10-25", False, 0, 0.30, None),
+    ("PO-2026-04333", "CH-HF-05",      "SUP-C02", 80,   "2026-09-20", "2026-09-28", True,  1, 0.60, None),
+    ("PO-2026-04466", "SW-300-P-2211", "SUP-W02", 1800, "2026-09-30", "2026-10-20", False, 0, 0.40, None),
+    ("PO-2026-04120", "MSK-N7-XR3390", "SUP-M01", 1,    "2026-09-12", "2026-09-16", True,  0, 1.00, None),
+    ("PO-2026-04277", "TG-Ti-77",      "SUP-T01", 20,   "2026-10-05", "2026-10-28", False, 0, 0.50, None),
+    ("PO-2026-04278", "TG-Ti-77",      "SUP-T01", 20,   "2026-10-10", "2026-10-18", True,  2, 0.70, None),
+    ("PO-2026-04279", "TG-Ta-79",      "SUP-T01", 30,   "2026-10-12", "2026-11-05", False, 3, 0.85, None),
+    # 手寫案例 HC-010 的分批交貨：8 片照原日期出、12 片延到 11/15。
+    ("PO-2026-04188", "TG-Cu-90",      "SUP-T02", 20,   "2026-09-30", "2026-10-08", True,  1, 0.75,
+     ("2026-11-15", 8, 12)),
 ]
 
 
@@ -229,12 +236,69 @@ def _consistent_share(qty: int, target: float) -> float:
     return round(qty / period_qty, 2)
 
 
+# 領域假設：約 20% 的單分兩批交貨（先出一部分、其餘延後）——
+#   這是物料企劃最常見卻最少被工具處理的回覆型態之一。
+#   光罩一次只買 1 片，不會分批（qty=1 沒有「先出 0.3 片」這種事）。
+#
+# 踩坑紀錄：一開始直接用全域 random 抽「要不要分批」，多插進去的抽樣
+# 會往後撬動每一張後續生成單的料號／供應商抽樣序列 —— 結果某供應商
+# 因此再也沒被抽中當任何料號的主要供應商，來源清單裡整個消失，
+# 連帶歷史單怎麼抽都抽不到它（見 tests/test_generate_history.py 的漂移測試）。
+# 分批決策改用獨立的 RNG，不去動全域 random 的抽樣序列。
+def _random_split_schedule(qty: int, committed: date,
+                           rng: random.Random) -> list[tuple[int, str, int]]:
+    """
+    隨機決定一張單是否分兩批交貨，回傳排程行清單 [(sched_line, committed_date, qty), ...]。
+
+    第二批比第一批晚 7～30 天；數量拆法為 30/70 或 50/50，取整數後
+    仍確保兩批相加等於總量、且每批至少 1 個單位（避免出現「這批 0 件」）。
+    """
+    if qty > 1 and rng.random() < 0.20:
+        frac = rng.choice([0.3, 0.5])
+        qty1 = max(1, min(qty - 1, round(qty * frac)))
+        qty2 = qty - qty1
+        date2 = committed + timedelta(days=rng.randint(7, 30))
+        return [(1, committed.isoformat(), qty1), (2, date2.isoformat(), qty2)]
+    return [(1, committed.isoformat(), qty)]
+
+
+def _explode_schedule(rows: list[dict]) -> list[dict]:
+    """
+    把「一張單一列」的內部資料，展開成「每筆交貨排程行一列」寫進 CSV。
+
+    領域假設／教訓：分批交貨在 ERP 裡本來就是多筆排程行；CSV 若維持一張單一列，
+    等於在資料層就把「先到的那批」丟掉了，下游不管怎麼寫都救不回來
+    （這正是 sqlite_source.py 原本 latest_sched CTE 的簡化，見 docs/設計決策.md 決策 19）。
+
+    share_of_period_demand 改成「這一批」的佔比（分子是 sched_qty，不是項次總量），
+    對齊 SqliteSource 用 sched_qty／period_demand_qty 算出來的版本——
+    否則 CSV 與 SQLite 兩種來源在分批交貨的單上會對不出一致的佔比。
+    """
+    exploded: list[dict] = []
+    for r in rows:
+        qty = int(r["qty"])
+        total_share = float(r["share_of_period_demand"]) or 1.0
+        period_qty = max(qty, int(round(qty / total_share)))
+        for sched_line, committed_date, sched_qty in r["schedule"]:
+            row = {k: v for k, v in r.items() if k != "schedule"}
+            row["committed_date"] = committed_date
+            row["sched_line"] = sched_line
+            row["sched_qty"] = sched_qty
+            row["share_of_period_demand"] = round(sched_qty / period_qty, 2)
+            exploded.append(row)
+    return exploded
+
+
 def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date) -> list[dict]:
-    gr_days = _load_config()["receiving"]["gr_processing_days"]
+    cfg = _load_config()
+    gr_days = cfg["receiving"]["gr_processing_days"]
+    # 獨立於全域 random 的分批決策亂數來源，理由見 _random_split_schedule 上方註解。
+    # 種子固定（用資料產生器同一組 seed 派生），確保跑起來可重現。
+    split_rng = random.Random(cfg["data_generation"]["seed"] ^ 0x53504C54)  # "SPLT"
     by_id = {m["material_id"]: m for m in materials}
     rows: list[dict] = []
 
-    for (po, mid, sup, qty, committed, need, sched, resched, share) in FIXED_POS:
+    for (po, mid, sup, qty, committed, need, sched, resched, share, split) in FIXED_POS:
         if mid not in by_id:  # 固定料號若不在主檔則補上，確保 demo 一定跑得起來
             by_id[mid] = {
                 "material_id": mid, "category": MaterialCategory.SILICON_WAFER.value,
@@ -248,6 +312,12 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
         #   （0-14 天）」，不是跟 as_of 綁死的固定區間——固定 30-120 天
         #   會讓矽晶圓（前置期常常就超過 90 天）看起來像壓線下單。
         lt = int(by_id[mid]["std_lead_time_days"])
+        if split:
+            date2, qty1, qty2 = split
+            assert qty1 + qty2 == qty, f"{po} 分批數量沒有加總等於項次總量"
+            schedule = [(1, committed, qty1), (2, date2, qty2)]
+        else:
+            schedule = [(1, committed, qty)]
         rows.append({
             "po_no": po, "material_id": mid, "supplier_id": sup, "qty": qty,
             "committed_date": committed, "need_date": need,
@@ -255,6 +325,7 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
             "share_of_period_demand": share,
             "po_created_date": (date.fromisoformat(committed)
                                - timedelta(days=lt + random.randint(0, 14))).isoformat(),
+            "schedule": schedule,
         })
 
     seq = 4600
@@ -291,6 +362,7 @@ def build_pos(materials: list[dict], suppliers: list[dict], n: int, as_of: date)
             "reschedule_count": random.choices([0, 1, 2, 3, 4], weights=[0.55, 0.22, 0.13, 0.07, 0.03])[0],
             "share_of_period_demand": _consistent_share(qty, random.uniform(0.15, 1.0)),
             "po_created_date": (committed - timedelta(days=lt + random.randint(0, 14))).isoformat(),
+            "schedule": _random_split_schedule(qty, committed, split_rng),
         })
     return rows
 
@@ -542,7 +614,11 @@ def main() -> None:
     import pandas as pd
     pd.DataFrame(suppliers).to_csv(DATA / "suppliers.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(materials).to_csv(DATA / "materials.csv", index=False, encoding="utf-8-sig")
-    pd.DataFrame(pos).to_csv(DATA / "po_master.csv", index=False, encoding="utf-8-sig")
+    # po_master.csv 是每筆交貨排程行一列（分批交貨時同一張單有多列），
+    # 不是每張單一列 —— build_emails() 用的是還沒展開的 pos（見上方呼叫），
+    # 因為信件內容談的是「這張單」，不是某一筆排程行。
+    pd.DataFrame(_explode_schedule(pos)).to_csv(
+        DATA / "po_master.csv", index=False, encoding="utf-8-sig")
 
     # 信件以純文字檔落地，模擬「從信箱匯出的一批郵件」
     for e in all_emails:

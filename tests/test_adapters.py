@@ -72,19 +72,27 @@ def test_columns_match_contract(sources, table, contract):
 # 兩種來源的一致性
 # ---------------------------------------------------------------------------
 def test_same_purchase_orders(sources):
+    """
+    分批交貨後同一張單可能有多列，鍵必須是 (po_no, sched_line)，
+    否則同一張單兩批會被誤判成「兩邊集合不一致」。
+    """
     csv_src, db_src = sources
-    a = csv_src.purchase_orders().set_index("po_no").sort_index()
-    b = db_src.purchase_orders().set_index("po_no").sort_index()
-    assert list(a.index) == list(b.index), "兩種來源的採購單集合不一致"
+    a = csv_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()
+    b = db_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()
+    assert list(a.index) == list(b.index), "兩種來源的（採購單號、排程行）集合不一致"
 
 
 @pytest.mark.parametrize("col", ["material_id", "supplier_id", "qty",
                                  "committed_date", "need_date"])
 def test_plain_fields_agree(sources, col):
-    """這些欄位在兩邊都是直接取用，必須完全相同。"""
+    """
+    這些欄位在兩邊都是直接取用，必須完全相同。
+    鍵改成 (po_no, sched_line)：分批交貨時 committed_date 是「這一批」的日期，
+    只用 po_no 當鍵會把兩批混在一起比較，比出假的不一致。
+    """
     csv_src, db_src = sources
-    a = csv_src.purchase_orders().set_index("po_no").sort_index()[col]
-    b = db_src.purchase_orders().set_index("po_no").sort_index()[col]
+    a = csv_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()[col]
+    b = db_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()[col]
     mismatch = (a.astype(str) != b.astype(str)).sum()
     assert mismatch == 0, f"{col} 有 {mismatch} 筆不一致"
 
@@ -92,11 +100,12 @@ def test_plain_fields_agree(sources, col):
 def test_reschedule_count_derived_from_change_log_agrees(sources):
     """
     改期次數：CSV 是現成欄位，SQLite 必須 COUNT 變更文件。
-    這是「ERP 裡沒有現成欄位」的代表案例。
+    這是「ERP 裡沒有現成欄位」的代表案例。改期次數是項次層級的事實，
+    分批交貨的兩批會有相同的值，仍以 (po_no, sched_line) 為鍵比對。
     """
     csv_src, db_src = sources
-    a = csv_src.purchase_orders().set_index("po_no").sort_index()["reschedule_count"]
-    b = db_src.purchase_orders().set_index("po_no").sort_index()["reschedule_count"]
+    a = csv_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()["reschedule_count"]
+    b = db_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()["reschedule_count"]
     assert (a.astype(int) != b.astype(int)).sum() == 0
 
 
@@ -114,12 +123,13 @@ def test_second_source_derived_from_source_list_agrees(sources):
 
 def test_demand_share_agrees_within_rounding(sources):
     """
-    佔比：SQLite 由「本單量 ÷ 請購單當期需求量」算出，
+    佔比：SQLite 由「本批量 ÷ 請購單當期需求量」算出（分子是 sched_qty，
+    不是項次總量 qty —— 分批交貨時每一批各自佔當期需求的一部分），
     會有整數化的捨入誤差，因此只要求近似相等。
     """
     csv_src, db_src = sources
-    a = csv_src.purchase_orders().set_index("po_no").sort_index()["share_of_period_demand"]
-    b = db_src.purchase_orders().set_index("po_no").sort_index()["share_of_period_demand"]
+    a = csv_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()["share_of_period_demand"]
+    b = db_src.purchase_orders().set_index(["po_no", "sched_line"]).sort_index()["share_of_period_demand"]
     assert (a.astype(float) - b.astype(float)).abs().max() < 0.02
 
 
@@ -220,3 +230,87 @@ def test_source_list_vendor_type_matches_material_category(new_world_db):
     for material_id, category, vendor_type in rows:
         assert vendor_type == CATEGORY_SUPPLIER_TYPE[category], (
             material_id, category, vendor_type)
+
+
+# ---------------------------------------------------------------------------
+# 分批交貨（Plan 3 Task 1）：交貨排程行改成每行一列
+#
+# pipeline／畫面／匯出還沒對位到排程行（那是 Task 3 的範圍），這裡只驗證
+# 資料層：兩個來源是不是都老實地把每一批當成獨立的一列回傳。
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def new_world_sources(new_world_db):
+    return CsvSource(new_world_db.parent), SqliteSource(new_world_db)
+
+
+def test_purchase_orders_has_one_row_per_schedule_line(new_world_sources):
+    """
+    SqliteSource 過去用 latest_sched CTE 把同一項次的排程行壓成一列
+    （取最晚的一筆），分批交貨時先到的那批因此完全消失。改成每行一列後，
+    同一張單有兩筆排程行時 purchase_orders() 就該回傳兩列，
+    po_no 相同、sched_line 不同、且不能重複。
+    """
+    _, db_src = new_world_sources
+    po = db_src.purchase_orders()
+    assert {"sched_line", "sched_qty"} <= set(po.columns)
+    dup = po[po.duplicated(["po_no", "sched_line"], keep=False)]
+    assert dup.empty, f"同一張單同一排程行出現多列：{dup['po_no'].tolist()}"
+
+    split_pos = po.groupby("po_no").filter(lambda g: len(g) > 1)
+    assert not split_pos.empty, "新世界資料裡沒有任何分批交貨的單，測試前提不成立"
+    for po_no, g in split_pos.groupby("po_no"):
+        assert sorted(g["sched_line"]) == list(range(1, len(g) + 1)), po_no
+        assert g["sched_qty"].sum() == g["qty"].iloc[0], (
+            po_no, "各批數量加總應等於項次總量")
+
+
+def test_single_line_pos_behave_exactly_as_before(new_world_sources):
+    """
+    回歸：沒有分批的單，sched_line 固定是 1、sched_qty 等於 qty ——
+    行為要跟改版前「每張單一列」完全一樣，不能因為支援分批就連帶動到多數單。
+    """
+    _, db_src = new_world_sources
+    po = db_src.purchase_orders()
+    single = po.groupby("po_no").filter(lambda g: len(g) == 1)
+    assert not single.empty
+    assert (single["sched_line"] == 1).all()
+    assert (single["sched_qty"] == single["qty"]).all()
+
+
+def test_csv_source_also_has_sched_line_and_sched_qty(new_world_sources):
+    """CSV 來源（po_master.csv）也要有 sched_line／sched_qty，單一排程行時 sched_line=1。"""
+    csv_src, _ = new_world_sources
+    po = csv_src.purchase_orders()
+    assert {"sched_line", "sched_qty"} <= set(po.columns)
+    single = po.groupby("po_no").filter(lambda g: len(g) == 1)
+    assert (single["sched_line"] == 1).all()
+    assert (single["sched_qty"] == single["qty"]).all()
+
+
+def test_csv_and_sqlite_agree_on_po_and_schedule_line_set(new_world_sources):
+    """
+    兩個資料來源對「哪些單有幾批」的看法必須一致，否則換資料來源時
+    行動清單的筆數會對不上，而且沒有明顯的錯誤訊息。
+    """
+    csv_src, db_src = new_world_sources
+    a = set(map(tuple, csv_src.purchase_orders()[["po_no", "sched_line"]].values))
+    b = set(map(tuple, db_src.purchase_orders()[["po_no", "sched_line"]].values))
+    assert a == b
+
+
+def test_hc010_po_is_split_8_and_12_in_both_sources(new_world_sources):
+    """
+    手寫案例 HC-010 依賴 PO-2026-04188 分批交貨（8 片照原日期 2026-09-30、
+    12 片延到 2026-11-15）；這是固定資料，兩種來源都必須看得到兩批，
+    否則信件內容跟 ERP 資料會對不上，展示時一眼穿幫。
+    """
+    csv_src, db_src = new_world_sources
+    for src in (csv_src, db_src):
+        rows = (src.purchase_orders()
+                .query("po_no == 'PO-2026-04188'")
+                .sort_values("sched_line"))
+        assert list(rows["sched_line"]) == [1, 2], src.name
+        assert list(rows["sched_qty"]) == [8, 12], src.name
+        assert list(rows["committed_date"].astype(str).str[:10]) == [
+            "2026-09-30", "2026-11-15"], src.name
+        assert (rows["qty"] == 20).all(), src.name

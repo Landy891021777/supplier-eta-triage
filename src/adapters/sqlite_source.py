@@ -8,8 +8,9 @@
 下面三段 SQL 對應三個整合時真正會遇到的問題：
 
   1. 承諾日不在採購單頭，在交貨排程行 (po_schedule)。
-     一個項次可能有多筆排程行（分批交貨），要決定取哪一筆。
-     本版取最晚的一筆，並在 README 標為已知簡化。
+     一個項次可能有多筆排程行（分批交貨）——本版不再把它們壓成一筆，
+     而是每一筆排程行各自一列，讓「先到的那批」跟「延後的那批」
+     都看得見（見 docs/設計決策.md 決策 19）。
 
   2. 改期次數不是一個欄位，是變更文件裡「承諾日被改」的筆數。
      必須 COUNT 出來。
@@ -37,17 +38,7 @@ DEFAULT_DB = ROOT / "data" / "erp_sim.db"
 # 採購單視圖：把散在六張表的資訊組回工具需要的樣子
 # ---------------------------------------------------------------------------
 PO_SQL = """
-WITH latest_sched AS (
-    -- 承諾日：取該項次最晚的一筆排程行。
-    -- 分批交貨時這是簡化處理（見 README 已知限制）：
-    -- 正確做法是把每一筆排程行當成獨立的追蹤單位。
-    SELECT po_no, item_no,
-           MAX(committed_date) AS committed_date,
-           SUM(qty)            AS sched_qty
-    FROM po_schedule
-    GROUP BY po_no, item_no
-),
-reschedules AS (
+WITH reschedules AS (
     -- 改期次數：變更文件中「承諾日」被修改的筆數。
     -- 真實 ERP 沒有現成欄位，這就是它真正的樣子。
     SELECT po_no, item_no, COUNT(*) AS reschedule_count
@@ -60,19 +51,24 @@ SELECT
     i.material_id                             AS material_id,
     h.vendor_id                               AS supplier_id,
     i.qty                                     AS qty,
+    s.sched_line                              AS sched_line,
+    s.qty                                     AS sched_qty,
     s.committed_date                          AS committed_date,
     r.need_date                               AS need_date,
     COALESCE(r.downstream_scheduled, 0)       AS downstream_scheduled,
     COALESCE(rs.reschedule_count, 0)          AS reschedule_count,
-    -- 本單數量佔該料號當期需求的比例。
+    -- 本批數量佔該料號當期需求的比例。
+    -- 分子是「這一批」的數量（sched_qty），不是項次總量 ——
+    -- 分批交貨時，先到的那批跟延後的那批各自佔當期需求的一部分，
+    -- 混在一起算會讓「這批影響有多大」失真。
     -- 分母來自請購單，不是採購單 —— 需求是需求，採購是採購。
     CASE WHEN COALESCE(r.period_demand_qty, 0) > 0
-         THEN ROUND(CAST(i.qty AS REAL) / r.period_demand_qty, 4)
+         THEN ROUND(CAST(s.qty AS REAL) / r.period_demand_qty, 4)
          ELSE 1.0 END                         AS share_of_period_demand,
     h.created_date                            AS po_created_date
 FROM po_header h
 JOIN po_item      i  ON i.po_no = h.po_no
-JOIN latest_sched s  ON s.po_no = i.po_no AND s.item_no = i.item_no
+JOIN po_schedule  s  ON s.po_no = i.po_no AND s.item_no = i.item_no
 LEFT JOIN purchase_req r  ON r.pr_no  = i.pr_no
 LEFT JOIN reschedules  rs ON rs.po_no = i.po_no AND rs.item_no = i.item_no
 LEFT JOIN goods_receipt g ON g.po_no  = i.po_no AND g.item_no = i.item_no
@@ -80,8 +76,14 @@ LEFT JOIN goods_receipt g ON g.po_no  = i.po_no AND g.item_no = i.item_no
 -- 這個條件在 CSV 版本不存在，因為 CSV 裡壓根沒有歷史單 ——
 -- 這正是扁平檔案掩蓋掉的另一個現實：真實 ERP 裡未結與已結的單混在一起，
 -- 「哪些還要追」本身就是一個要靠 JOIN 判斷的問題。
+--
+-- goods_receipt 目前仍以 (po_no, item_no) 為鍵，不是 (po_no, item_no, sched_line)：
+-- 歷史單（generate_history.py）刻意只留單一排程行（見決策 19），還沒有
+-- 「這批到了、那批還沒到」的收貨資料。分批交貨的兩筆排程行因此暫時共用
+-- 同一個「有沒有收貨」判斷。真實 ERP 會用排程行本身對收貨（EKET-ETENR），
+-- 讓每一批各自判斷是否已到——這裡誠實標記為待確認事項，不假裝已經做到。
 WHERE g.gr_no IS NULL
-ORDER BY h.po_no
+ORDER BY h.po_no, s.sched_line
 """
 
 # ---------------------------------------------------------------------------
