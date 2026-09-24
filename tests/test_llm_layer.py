@@ -68,10 +68,10 @@ def test_prompt_includes_committed_date_context():
     那個資訊在我方系統裡。不把它放進 prompt，就是要求模型猜一個
     它不可能知道的數字。這是設計者的錯，不是模型的錯。
     """
-    email = {"email_id": "T-1", "supplier_id": "SUP-F01",
+    email = {"email_id": "T-1", "supplier_id": "SUP-W01",
              "received_at": "2026-09-08 09:00", "subject": "RE: PO-2026-04417",
              "body": "we may need roughly 2 more week(s) beyond the original date"}
-    known = [{"po_no": "PO-2026-04417", "material_id": "WF-N6-XR3390",
+    known = [{"po_no": "PO-2026-04417", "material_id": "SW-300-E-3390",
               "committed_date": "2026-10-15", "need_date": "2026-10-22"}]
     prompt = extract_llm.build_prompt(email, "2026-09-08", known)
 
@@ -82,7 +82,7 @@ def test_prompt_includes_committed_date_context():
 
 def test_prompt_still_works_with_plain_po_list():
     """向後相容：只給 PO 號清單時不應該壞掉。"""
-    email = {"supplier_id": "SUP-F01", "subject": "x", "body": "y"}
+    email = {"supplier_id": "SUP-W01", "subject": "x", "body": "y"}
     prompt = extract_llm.build_prompt(email, "2026-09-08", ["PO-2026-04417"])
     assert "PO-2026-04417" in prompt
 
@@ -104,7 +104,7 @@ def test_null_provider_fails_explicitly_rather_than_faking():
 
 
 def test_extract_returns_empty_and_flags_when_no_provider():
-    email = {"supplier_id": "SUP-F01", "subject": "x", "body": "y"}
+    email = {"supplier_id": "SUP-W01", "subject": "x", "body": "y"}
     recs, meta = extract_llm.extract(email, "2026-09-08", [], NullProvider())
     assert recs == []
     assert meta["ok"] is False

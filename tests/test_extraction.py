@@ -19,9 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import extract_rules  # noqa: E402
-from domain import ChangeType, CommitmentStrength  # noqa: E402
+from domain import ChangeType  # noqa: E402
 from handcrafted_emails import HANDCRAFTED  # noqa: E402
-from impact import evaluate  # noqa: E402
 
 HC = {e["email_id"]: e for e in HANDCRAFTED}
 
@@ -113,107 +112,116 @@ def test_original_label_does_not_poison_next_line():
 
 
 # ---------------------------------------------------------------------------
-# 影響評估：方向性必須正確
+# 分批交貨：一封信可以講同一張單的多批交期
 # ---------------------------------------------------------------------------
-WEIGHTS = {k: 10 for k in [
-    "buffer_days", "delay_magnitude", "single_source", "downstream_scheduled",
-    "material_criticality", "commitment_strength", "reschedule_count",
-    "delay_share", "notice_lead_time", "substitutability"]}
-THRESH = {"P1": 70, "P2": 45}
-
-BASE_PO = {"committed_date": "2026-10-01", "need_date": "2026-10-20",
-           "downstream_scheduled": False, "reschedule_count": 0,
-           "share_of_period_demand": 0.3}
-BASE_MAT = {"has_qualified_second_source": True, "criticality": "low",
-            "std_lead_time_days": 30, "is_bottleneck": False,
-            "alt_material_id": "ALT-1"}
-
-
-def _score(rec_overrides=None, po_overrides=None, mat_overrides=None) -> float:
-    rec = {"new_eta": "2026-10-10", "committed_date": "2026-10-01",
-           "received_at": "2026-09-08", "change_type": ChangeType.DELAY.value,
-           "commitment_strength": CommitmentStrength.CONFIRMED.value}
-    rec.update(rec_overrides or {})
-    po = {**BASE_PO, **(po_overrides or {})}
-    mat = {**BASE_MAT, **(mat_overrides or {})}
-    return evaluate(rec, po, mat, {}, WEIGHTS, THRESH)["impact_score"]
-
-
-def test_negative_buffer_raises_impact():
-    """緩衝變負（趕不上）必須推高分數，這是第一順位規則。"""
-    ok = _score(po_overrides={"need_date": "2026-11-30"})
-    late = _score(po_overrides={"need_date": "2026-10-05"})
-    assert late > ok
-
-
-def test_unconfirmed_commitment_raises_impact():
-    """越不確定越該處理 —— 這條規則的方向反直覺，必須守住。"""
-    confirmed = _score({"commitment_strength": CommitmentStrength.CONFIRMED.value})
-    intent = _score({"commitment_strength": CommitmentStrength.INTENT_ONLY.value})
-    assert intent > confirmed
-
-
-def test_single_source_raises_impact():
-    dual = _score(mat_overrides={"has_qualified_second_source": True})
-    single = _score(mat_overrides={"has_qualified_second_source": False})
-    assert single > dual
-
-
-def test_repeat_offender_raises_impact():
-    first = _score(po_overrides={"reschedule_count": 0})
-    fourth = _score(po_overrides={"reschedule_count": 3})
-    assert fourth > first
-
-
-def test_no_change_scores_zero_and_leaves_action_list():
-    res = evaluate({"change_type": ChangeType.NO_CHANGE.value, "new_eta": None,
-                    "commitment_strength": CommitmentStrength.CONFIRMED.value,
-                    "received_at": "2026-09-08"},
-                   BASE_PO, BASE_MAT, {}, WEIGHTS, THRESH)
-    assert res["impact_score"] == 0.0
-    assert res["priority"] == "—", "確認不變的案件不應進入行動清單"
-
-
-def test_pull_in_is_capped():
-    """提前交貨要處理倉容與付款，但不該和斷料排在一起。"""
-    res = evaluate({"change_type": ChangeType.PULL_IN.value, "new_eta": "2026-09-20",
-                    "commitment_strength": CommitmentStrength.CONFIRMED.value,
-                    "received_at": "2026-09-08"},
-                   {**BASE_PO, "need_date": "2026-09-15"},
-                   {**BASE_MAT, "has_qualified_second_source": False,
-                    "criticality": "high", "is_bottleneck": True},
-                   {}, WEIGHTS, THRESH)
-    assert res["impact_score"] <= 40.0
-
-
-# ---------------------------------------------------------------------------
-# 空值處理（回歸測試）
-# ---------------------------------------------------------------------------
-def test_nan_alt_material_is_treated_as_no_alternative():
+def test_hc010_split_shipment_yields_two_records():
     """
-    回歸測試：料號主檔的「替代料」欄位在 CSV 裡是空字串，
-    用 pandas 讀進來會變成 float NaN，而 str(NaN) == "nan" 是非空字串。
-
-    早期版本因此對生管顯示「有替代料 nan 可評估」，
-    並錯誤地把影響分數往下調 —— 畫面出現看不懂的字，優先序也算錯了。
+    HC-010：「8 pcs on the original date 2026-09-30, remaining 12 pcs
+    deferred to 2026-11-15」必須拆成兩筆，不能只取最晚那批——
+    只取最晚一筆等於把準時到的 8 片當成不存在，缺料清單會漏看真正的風險。
     """
-    import math
-    from impact import rule_substitutability
+    recs = _extract("HC-010")
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert set(by_qty) == {8, 12}
 
-    for empty in (float("nan"), None, "", "  ", "NaN", "None"):
-        score, why = rule_substitutability({"material": {"alt_material_id": empty}})
-        assert score == 1.00, f"{empty!r} 應視為無替代料"
-        assert "nan" not in why.lower(), f"理由文字不可出現 nan：{why}"
+    on_time = by_qty[8]
+    assert on_time["po_no"] == "PO-2026-04188"
+    assert on_time["new_eta"] == "2026-09-30"
+    assert on_time["change_type"] == ChangeType.NO_CHANGE.value
 
-    score, why = rule_substitutability({"material": {"alt_material_id": "WF-N7-KL2211"}})
-    assert score == 0.20
-    assert "WF-N7-KL2211" in why
+    delayed = by_qty[12]
+    assert delayed["po_no"] == "PO-2026-04188"
+    assert delayed["new_eta"] == "2026-11-15"
+    assert delayed["change_type"] == ChangeType.DELAY.value
 
 
-def test_clean_str_normalises_empty_values():
-    from impact import _clean_str
+def test_split_shipment_generalises_to_different_wording():
+    """
+    規則不可以寫死 HC-010 的句子——換一種說法（不同單位、不同日期格式）
+    也要抓得到兩批，否則只是背答案，遇到真實信件的其他寫法就會失效。
+    """
+    email = {
+        "subject": "Shipment update",
+        "body": ("PO-2026-09999: 1,000 pcs ship on 10/05, the remaining 500 pcs "
+                 "will follow on 10/26."),
+        "supplier_id": "SUP-TEST",
+    }
+    recs = [r.to_dict() for r in extract_rules.extract(email)]
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert set(by_qty) == {1000, 500}
+    assert by_qty[1000]["new_eta"] == "2026-10-05"
+    assert by_qty[1000]["change_type"] == ChangeType.NO_CHANGE.value
+    assert by_qty[500]["new_eta"] == "2026-10-26"
+    assert by_qty[500]["change_type"] == ChangeType.DELAY.value
 
-    assert _clean_str(float("nan")) == ""
-    assert _clean_str(None) == ""
-    assert _clean_str("nan") == ""
-    assert _clean_str("  WF-1  ") == "WF-1"
+
+def test_split_shipment_chinese_wording_without_first_batch_date():
+    """
+    中文寫法「先出 X，其餘 Y 延到某日」通常不會重述第一批的日期——
+    這時第一批的 new_eta 應為 null（不可亂猜），但仍要拆成兩筆、各帶 qty。
+    """
+    email = {
+        "subject": "分批出貨通知",
+        "body": "PO-2026-08888 先出 2,000 片，其餘 3,000 片延到 11/15",
+        "supplier_id": "SUP-TEST",
+    }
+    recs = [r.to_dict() for r in extract_rules.extract(email)]
+    assert len(recs) == 2
+    by_qty = {r["qty"]: r for r in recs}
+    assert by_qty[2000]["new_eta"] is None
+    assert by_qty[2000]["change_type"] == ChangeType.NO_CHANGE.value
+    assert by_qty[3000]["new_eta"] == "2026-11-15"
+    assert by_qty[3000]["change_type"] == ChangeType.DELAY.value
+
+
+def test_non_split_email_still_yields_one_record():
+    """
+    回歸測試：沒有分批的信不可以被誤判成分批，否則好端端一張單會被拆成兩筆。
+    HC-006 是單張單的「確認不變」信，沒有「其餘／remaining」這類轉折詞。
+    """
+    recs = _extract("HC-006")
+    assert len(recs) == 1
+
+
+def test_score_email_scores_split_batches_separately():
+    """
+    分批交貨的兩批要能分別計分：其中一批日期抓對、另一批抓錯，
+    eta_exact 應該是 0.5 而不是被同一個 po_no 蓋成一筆。
+    """
+    import evaluate
+    truth = [
+        {"po_no": "PO-2026-04188", "qty": 8, "new_eta": "2026-09-30",
+         "commitment_strength": "confirmed", "change_type": "no_change"},
+        {"po_no": "PO-2026-04188", "qty": 12, "new_eta": "2026-11-15",
+         "commitment_strength": "confirmed", "change_type": "delay"},
+    ]
+    pred = [
+        {"po_no": "PO-2026-04188", "qty": 8, "new_eta": "2026-09-30",
+         "commitment_strength": "confirmed", "change_type": "no_change"},
+        {"po_no": "PO-2026-04188", "qty": 12, "new_eta": "2026-10-01",  # 日期抓錯
+         "commitment_strength": "estimated", "change_type": "delay"},
+    ]
+    s = evaluate.score_email(pred, truth)
+    assert s["po_hit"] == 1.0, "兩批都有輸出，即使其中一批日期錯，po_hit 仍應為 1"
+    assert s["eta_exact"] == 0.5
+
+
+def test_score_email_counts_false_confirmed_separately():
+    """
+    把託辭判成「已確認」是本工具最危險的錯，必須單獨算出來。
+    只看 strength_ok 的話，它跟「暫估判成僅意向」這種無害的錯被算成一樣。
+    """
+    import evaluate
+    truth = [{"po_no": "A", "commitment_strength": "intent_only", "change_type": "delay",
+              "new_eta": "2026-10-31"},
+             {"po_no": "B", "commitment_strength": "estimated", "change_type": "delay",
+              "new_eta": "2026-10-20"}]
+    pred = [{"po_no": "A", "commitment_strength": "confirmed", "change_type": "delay",
+             "new_eta": "2026-10-31"},
+            {"po_no": "B", "commitment_strength": "intent_only", "change_type": "delay",
+             "new_eta": "2026-10-20"}]
+    s = evaluate.score_email(pred, truth)
+    assert s["strength_ok"] == 0.0
+    assert s["false_confirmed"] == 1

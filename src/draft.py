@@ -18,8 +18,9 @@
 from __future__ import annotations
 
 from llm.provider import BaseProvider, get_provider
+from triage import _missing
 
-PROMPT = """你是半導體公司的生產管理專員，正要回信給供應商窗口，追一張交期有變的採購單。
+PROMPT = """你是半導體公司的物料企劃，正要回信給供應商窗口，追一張交期有變的採購單。
 
 案件資訊：
 - 採購單號：{po_no}
@@ -29,7 +30,7 @@ PROMPT = """你是半導體公司的生產管理專員，正要回信給供應�
 - 供應商新回覆交期：{new_eta}
 - 供應商承諾強度：{strength}
 - 下游需求日：{need_date}
-- 系統判定影響程度：{priority}（影響分數 {impact}）
+- 系統判定：{priority}（預估缺料天數 {gap}；正數代表預估來不及，負數代表尚有緩衝）
 - 主要原因：{reasons}
 
 請寫一封繁體中文的回信草稿，要求：
@@ -43,8 +44,35 @@ PROMPT = """你是半導體公司的生產管理專員，正要回信給供應�
 只輸出信件內文，不要加任何說明或標題。"""
 
 
+def _clean_row_fields(row: dict) -> dict:
+    """
+    把要顯示給供應商看的欄位做一次空值正規化。
+
+    ===========================  為什麼需要  ===========================
+    pandas 3 會把整欄裡的 `None` 靜默轉成 float NaN（`df.iloc[i].to_dict()`
+    尤其明顯：即使原始值是 `None`，只要同一欄有其他列是數字或字串，
+    整欄會被統一成 object/float dtype，`None` 就變成 `NaN`）。
+    `NaN` 是 truthy，`row.get("new_eta") or "（未提供）"` 這種寫法完全擋
+    不住，草稿因此對供應商寫出「交期為 nan」「預估缺料天數 nan」這種
+    字面上的 bug。`gap_days` 還有另一個坑：只要整欄混進 NaN，pandas 會把
+    欄位升成 float64，整數 39 就變成 39.0，一樣不能直接印給供應商看。
+    ======================================================================
+    """
+    eta = row.get("new_eta")
+    gap = row.get("gap_days")
+    return {
+        "eta": None if _missing(eta) else eta,
+        "committed_date": "（未提供）" if _missing(row.get("committed_date"))
+                          else row.get("committed_date"),
+        "need_date": "（未提供）" if _missing(row.get("need_date"))
+                     else row.get("need_date"),
+        "gap_txt": "無法估計" if _missing(gap) else str(int(gap)),
+    }
+
+
 def _template_draft(row: dict) -> str:
     """無 LLM 時的規則式模板。欄位由系統填入，內容正確但語氣固定。"""
+    clean = _clean_row_fields(row)
     strength_map = {
         "confirmed": "貴司已確認之交期",
         "estimated": "貴司初步預估之交期",
@@ -52,7 +80,7 @@ def _template_draft(row: dict) -> str:
         "none": "（信中未提供明確日期）",
     }
     desc = strength_map.get(str(row.get("commitment_strength")), "貴司回覆之交期")
-    eta = row.get("new_eta") or "（未提供）"
+    eta = clean["eta"] or "（未提供）"
     ask = ""
     if row.get("commitment_strength") != "confirmed":
         ask = ("\n由於此日期尚未確認，煩請於本週內提供可承諾之確切出貨日，"
@@ -60,10 +88,10 @@ def _template_draft(row: dict) -> str:
     return (
         f"您好，\n\n"
         f"關於採購單 {row.get('po_no')}（料號 {row.get('material_id')}），"
-        f"原承諾交期為 {row.get('committed_date')}，"
+        f"原承諾交期為 {clean['committed_date']}，"
         f"目前{desc}為 {eta}。\n"
-        f"我方此料之下游需求日為 {row.get('need_date')}，"
-        f"本案經系統評估影響程度為 {row.get('priority')}。{ask}\n\n"
+        f"我方此料之下游需求日為 {clean['need_date']}，"
+        f"本案經系統評估為 {row.get('priority')}。{ask}\n\n"
         f"若有部分數量可提前交付，也煩請一併告知，我方可據此調整投料順序。\n\n"
         f"感謝協助。\n\n"
         f"（本草稿由供應商交期回覆解析工具產生，寄出前請自行確認內容與語氣）"
@@ -76,13 +104,14 @@ def generate(row: dict, provider: BaseProvider | None = None) -> tuple[str, str]
     if not provider.available:
         return _template_draft(row), "規則式模板（未接 LLM）"
 
-    reasons = row.get("top_reasons") or []
+    clean = _clean_row_fields(row)
+    reasons = row.get("reasons") or []
     prompt = PROMPT.format(
         po_no=row.get("po_no"), material_id=row.get("material_id"),
-        supplier_name=row.get("supplier_name"), committed_date=row.get("committed_date"),
-        new_eta=row.get("new_eta") or "（信中未提供明確日期）",
-        strength=row.get("commitment_strength"), need_date=row.get("need_date"),
-        priority=row.get("priority"), impact=row.get("impact_score"),
+        supplier_name=row.get("supplier_name"), committed_date=clean["committed_date"],
+        new_eta=clean["eta"] or "（信中未提供明確日期）",
+        strength=row.get("commitment_strength"), need_date=clean["need_date"],
+        priority=row.get("priority"), gap=clean["gap_txt"],
         reasons="；".join(reasons) if isinstance(reasons, list) else str(reasons),
     )
     # json_mode=False：這是要給人讀的信，不是要進資料表的結構化資料。

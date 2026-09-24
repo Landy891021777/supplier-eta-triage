@@ -3,7 +3,7 @@
 領域常數與型別定義。
 
 本檔集中定義「這個工具眼中的世界」——料號類別、供應商類型、承諾強度、
-變更原因。之所以獨立成檔，是因為這些是跟採購/生管同仁溝通時的共同語言，
+變更原因。之所以獨立成檔，是因為這些是跟採購與物料企劃同仁溝通時的共同語言，
 未來要增修時應該只動這一個地方。
 """
 from __future__ import annotations
@@ -14,23 +14,70 @@ from enum import Enum
 
 class MaterialCategory(str, Enum):
     """
-    Fabless 情境下的委外料件類別。
+    晶圓廠（前段製造）的生產用料類別。
 
-    本專案範圍鎖定 WAFER 段（晶圓代工），因為那是我實際待過、
-    特徵判斷最有把握的環節。SUBSTRATE / ASSEMBLY 已預留欄位與介面，
-    但未實作對應的專屬規則——理由詳見 docs/設計決策.md。
+    範圍是物料企劃追的「生產用料」，不含備品（MRO）：備品屬設備工程的補料邏輯，
+    追料方式和生產用料不同。
     """
-    WAFER = "WAFER"            # 晶圓代工投片
-    MASK = "MASK"              # 光罩
-    SUBSTRATE = "SUBSTRATE"    # 載板（預留）
-    ASSEMBLY = "ASSEMBLY"      # 封裝（預留）
+    SILICON_WAFER = "SILICON_WAFER"    # 矽晶圓原片（拋光片、磊晶片）
+    PHOTORESIST = "PHOTORESIST"        # 光阻
+    SPECIALTY_GAS = "SPECIALTY_GAS"    # 特殊氣體
+    WET_CHEMICAL = "WET_CHEMICAL"      # 濕式化學品
+    TARGET = "TARGET"                  # 濺鍍靶材
+    MASK = "MASK"                      # 光罩
+    CMP_SLURRY = "CMP_SLURRY"          # 研磨液
 
 
 class SupplierType(str, Enum):
-    FOUNDRY = "FOUNDRY"
+    WAFER_MAKER = "WAFER_MAKER"
+    RESIST_MAKER = "RESIST_MAKER"
+    GAS_SUPPLIER = "GAS_SUPPLIER"
+    CHEMICAL_SUPPLIER = "CHEMICAL_SUPPLIER"
+    TARGET_MAKER = "TARGET_MAKER"
     MASK_SHOP = "MASK_SHOP"
-    SUBSTRATE = "SUBSTRATE"
-    OSAT = "OSAT"
+    SLURRY_MAKER = "SLURRY_MAKER"
+
+
+# 領域假設：一個料別只向一種供應商類型採購 —— 光阻不會去跟氣體廠買。
+# 產生資料、建模擬 ERP 的來源清單都用這張表，避免兩邊各寫一份而對不上。
+CATEGORY_SUPPLIER_TYPE = {
+    MaterialCategory.SILICON_WAFER.value: SupplierType.WAFER_MAKER.value,
+    MaterialCategory.PHOTORESIST.value: SupplierType.RESIST_MAKER.value,
+    MaterialCategory.SPECIALTY_GAS.value: SupplierType.GAS_SUPPLIER.value,
+    MaterialCategory.WET_CHEMICAL.value: SupplierType.CHEMICAL_SUPPLIER.value,
+    MaterialCategory.TARGET.value: SupplierType.TARGET_MAKER.value,
+    MaterialCategory.MASK.value: SupplierType.MASK_SHOP.value,
+    MaterialCategory.CMP_SLURRY.value: SupplierType.SLURRY_MAKER.value,
+}
+
+# 畫面與知識卡用中文顯示；企劃問「光阻廠準不準」時，檢索才對得到字。
+CATEGORY_LABEL_ZH = {
+    "SILICON_WAFER": "矽晶圓", "PHOTORESIST": "光阻", "SPECIALTY_GAS": "特殊氣體",
+    "WET_CHEMICAL": "濕式化學品", "TARGET": "靶材", "MASK": "光罩",
+    "CMP_SLURRY": "研磨液",
+}
+SUPPLIER_TYPE_LABEL_ZH = {
+    "WAFER_MAKER": "矽晶圓廠", "RESIST_MAKER": "光阻廠", "GAS_SUPPLIER": "特殊氣體廠",
+    "CHEMICAL_SUPPLIER": "化學品廠", "TARGET_MAKER": "靶材廠", "MASK_SHOP": "光罩廠",
+    "SLURRY_MAKER": "研磨液廠",
+}
+
+# 領域假設：各料別的標準前置期、計量單位與常見下單量。
+#   前置期是「下單到到廠」的合約天數；12 吋矽晶圓與靶材最長，化學品最短。
+#   跟 CATEGORY_SUPPLIER_TYPE 放在同一個檔案的理由相同：合成資料產生器
+#   （generate_data.py／generate_history.py）都要用同一份數量選項，
+#   不能各寫一份——那正是歷史單「數量跟料別對不起來」這個 bug 的成因。
+CATEGORY_SPEC = {
+    "SILICON_WAFER": {"lt": (60, 120), "uom": "PCS", "qty": [500, 1000, 1500, 2000, 3000, 5000]},
+    "PHOTORESIST":   {"lt": (30, 90),  "uom": "GAL", "qty": [20, 40, 80, 120, 200]},
+    "SPECIALTY_GAS": {"lt": (20, 60),  "uom": "CYL", "qty": [10, 20, 40, 60, 100]},
+    "WET_CHEMICAL":  {"lt": (10, 30),  "uom": "DRM", "qty": [20, 40, 80, 160]},
+    "TARGET":        {"lt": (45, 100), "uom": "PCS", "qty": [2, 4, 8, 12, 20, 30]},
+    "MASK":          {"lt": (14, 35),  "uom": "PCS", "qty": [1]},
+    "CMP_SLURRY":    {"lt": (20, 50),  "uom": "GAL", "qty": [50, 100, 200, 400]},
+}
+CATEGORY_WEIGHTS = {"SILICON_WAFER": .25, "PHOTORESIST": .15, "SPECIALTY_GAS": .15,
+                    "WET_CHEMICAL": .15, "TARGET": .10, "MASK": .10, "CMP_SLURRY": .10}
 
 
 class CommitmentStrength(str, Enum):
@@ -38,7 +85,7 @@ class CommitmentStrength(str, Enum):
     承諾強度 —— 本專案最重要的一個欄位。
 
     供應商回信說「大概月底吧，我再跟你確認」，如果工具把它抽成
-    2026-10-31 寫進表格，生管看到一個確切日期就會以為事情定了。
+    2026-10-31 寫進表格，物料企劃看到一個確切日期就會以為事情定了。
     這是把不確定性洗掉，比不解析還危險。
 
     因此解析層必須額外判斷「這句話到底算不算承諾」，
@@ -48,6 +95,14 @@ class CommitmentStrength(str, Enum):
     ESTIMATED = "estimated"      # 暫估：「預計月底」「大概晚兩週」
     INTENT_ONLY = "intent_only"  # 僅表達意向：「我們盡量」「再跟你確認」
     NONE = "none"                # 信中未提及新日期
+
+
+# 畫面與匯出用中文顯示；原始值（confirmed/estimated/...）仍是資料與判斷邏輯
+# 的依據，這張表只管顯示，不影響 triage／pipeline 的任何判斷。
+COMMITMENT_LABEL_ZH = {
+    "confirmed": "已確認", "estimated": "暫估",
+    "intent_only": "僅意向", "none": "未給日期",
+}
 
 
 class ChangeType(str, Enum):
@@ -64,13 +119,99 @@ class ChangeType(str, Enum):
 #   - 上游缺料：要往上追第二層供應商
 REASON_CODES = {
     "capacity": "產能排擠 / loading 滿載",
-    "yield": "良率或製程異常",
+    "yield": "製程或品質異常",
     "upstream_shortage": "上游原材料短缺",
     "logistics": "運輸 / 通關延誤",
     "customer_priority": "其他客戶插單優先",
     "internal_reschedule": "供應商內部重排",
     "not_stated": "未說明原因",
 }
+
+
+def coalesce_sched_line(v) -> int:
+    """
+    把排程行號正規化成 int：None／NaN（未對到 PO 主檔的列、Task 3 以前
+    存的舊資料、只有一筆排程行時測試自己組的精簡資料）一律當成第 1 行。
+
+    pipeline.py（retriage 比對確認紀錄）、planner_settings.py（讀舊格式
+    的確認紀錄）、ui_state.py／views/actions.py（畫面判斷確認是否生效）
+    都要對「沒有 sched_line」這件事做同一個決定，寫一份放在這裡，
+    不然哪天只改到一處，同一張單在不同畫面會被判成不同批次。
+    """
+    if v is None:
+        return 1
+    try:
+        if v != v:  # NaN
+            return 1
+    except TypeError:
+        pass
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 1
+
+
+def coalesce_batch_key(v) -> str:
+    """
+    把批次識別鍵正規化成字串：None／NaN（正常情況——大多數列同一封信
+    對同一個排程行只有一筆記錄，不需要區分）一律當成空字串 ""。
+
+    「批次識別鍵」（batch_key）是給同一封信裡對到同一個排程行的好幾筆
+    記錄用的區分依據（見 pipeline._resolve_record_batches：供應商提議
+    把一筆還沒拆行的排程行拆成好幾批時，或規則 4 的保守退路剛好讓兩筆
+    記錄都落到同一行時），不能只靠 (po_no, sched_line) 去重／查確認
+    紀錄，否則後面那筆會悄悄蓋掉前面那筆。
+    """
+    if v is None:
+        return ""
+    try:
+        if v != v:  # NaN
+            return ""
+    except TypeError:
+        pass
+    return str(v)
+
+
+def batch_label(sched_line, total_lines, *, proposed_total=None, proposed_index=None) -> str:
+    """
+    「批次」欄的顯示值：只有一筆排程行（沒有分批）時顯示「—」，
+    ERP 已經拆好排程行時顯示第幾批（sched_line）。
+
+    proposed_total／proposed_index：這一列是不是「供應商提議拆批，但
+    ERP 那筆排程行還沒真的拆開」（見 pipeline._resolve_record_batches）。
+    這種情況 total_lines 仍然是 1（ERP 沒變），只看 total_lines 會顯示
+    「—」，把「供應商其實講了不只一批」這件事藏起來——批次欄本來就是
+    要讓企劃一眼看出「這是哪一批」，這種情況要用不同的字樣講清楚
+    「這是供應商提議的批次，不是 ERP 已經拆好的批次」，不能跟 ERP
+    已經拆好的批次用同一種顯示方式，那會讓企劃誤以為系統已經拆行了。
+
+    畫面（views/actions.py）與匯出（exports.py）都要顯示同一件事，
+    只寫一份，避免哪天改了規則卻只改到一邊。
+    """
+    try:
+        pt = int(proposed_total) if proposed_total is not None else 0
+    except (TypeError, ValueError):
+        pt = 0
+    if pt > 1:
+        try:
+            pi = int(proposed_index)
+        except (TypeError, ValueError):
+            pi = "?"
+        try:
+            line = int(sched_line)
+        except (TypeError, ValueError):
+            line = sched_line
+        return f"{line}（供應商提議拆 {pt} 批之 {pi}）"
+    try:
+        total = int(total_lines)
+    except (TypeError, ValueError):
+        return "—"
+    if total <= 1:
+        return "—"
+    try:
+        return str(int(sched_line))
+    except (TypeError, ValueError):
+        return "—"
 
 
 @dataclass
@@ -86,6 +227,10 @@ class ExtractedRecord:
     confidence: float = 0.0              # 0~1，解析層對自己的信心
     extracted_by: str = "rule"           # rule | llm | none
     notes: str = ""
+    # 分批交貨：同一張 PO 一封信可以抽出多筆 record，用 qty 分開各批。
+    # 沒提到數量（絕大多數信件）就是 None，不強迫湊一個假數字出來。
+    qty: int | None = None
+    batch_note: str = ""                 # 例如「分批交貨的其中一批」；沒有就空字串
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from domain import CATEGORY_LABEL_ZH, SUPPLIER_TYPE_LABEL_ZH
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 DOCS = ROOT / "docs"
 
@@ -79,7 +81,8 @@ def supplier_cards(suppliers: pd.DataFrame, perf: pd.DataFrame | None,
         lines = [
             f"供應商代號：{s.supplier_id}",
             f"供應商名稱：{s.supplier_name}",
-            f"供應商類型：{s.supplier_type}",
+            f"供應商類型：{SUPPLIER_TYPE_LABEL_ZH.get(s.supplier_type, s.supplier_type)}"
+            f"（{s.supplier_type}）",
             f"目前未結採購單數：{open_count.get(s.supplier_id, 0)} 張",
         ]
         if p:
@@ -106,16 +109,25 @@ def material_cards(materials: pd.DataFrame, pos: pd.DataFrame) -> list[Card]:
         alt = _clean(m.alt_material_id)
         lines = [
             f"料號：{m.material_id}",
-            f"料件類別：{m.category}",
+            f"料件類別：{CATEGORY_LABEL_ZH.get(m.category, m.category)}（{m.category}）",
             f"標準前置期：{int(m.std_lead_time_days)} 天",
             f"是否為瓶頸料：{_yn(m.is_bottleneck)}",
             f"是否有已認證二源：{_yn(m.has_qualified_second_source)}"
             + ("" if m.has_qualified_second_source else "（單一來源，延遲時無法轉單）"),
             f"替代料：{alt or '無登錄替代料'}",
             f"關鍵性等級：{m.criticality}",
-            f"目前未結採購單：{len(mine)} 張"
-            + (f"（{', '.join(mine['po_no'].head(6))}）" if len(mine) else ""),
         ]
+        # 舊世界資料（本 Task 尚未重建）沒有這兩欄，或欄位值是 NaN——
+        # 缺值不寫進卡片，不然模型會把「未維護」誤讀成「就是這個值」。
+        uom = _clean(getattr(m, "base_uom", None))
+        if uom:
+            lines.append(f"計量單位：{uom}")
+        gr_days = getattr(m, "gr_processing_days", None)
+        if gr_days is not None and gr_days == gr_days:  # 排除 NaN（NaN 不等於自己）
+            lines.append(f"收貨處理天數（料號主檔預設）：{int(gr_days)} 天")
+        lines.append(
+            f"目前未結採購單：{len(mine)} 張"
+            + (f"（{', '.join(mine['po_no'].head(6))}）" if len(mine) else ""))
         cards.append(Card(
             card_id=f"MAT:{m.material_id}", kind="material",
             title=f"料號 {m.material_id}", text="\n".join(lines),
@@ -125,8 +137,20 @@ def material_cards(materials: pd.DataFrame, pos: pd.DataFrame) -> list[Card]:
 
 def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
              suppliers: pd.DataFrame, as_of: date) -> list[Card]:
+    """
+    每一筆交貨排程行一張卡（`pos` 是 purchase_orders()，分批交貨時同一個
+    po_no 會有兩列）。card_id 不能兩批都叫 `PO:{po_no}`——那樣後面那批
+    的卡會在 `HybridRetriever._by_id`（用 card_id 當鍵的字典）裡悄悄蓋掉
+    前一批，前一批的事實就從檢索裡消失了。只有一筆排程行的單維持
+    `PO:{po_no}`（不因為這次改版讓沒有分批的單多一段沒意義的 ID 後綴）；
+    分批的單改成 `PO:{po_no}#{sched_line}`，並在卡片內容裡把「這是第幾批」
+    講清楚，模型跟人都要看得出這張卡只是這張單的其中一批，不是全貌
+    （見 rag/retriever.py 的 pinned()：問句提到單號時，要把同一張單
+    所有批次的卡都釘選出來，不能只釘到其中一張）。
+    """
     mat_idx = materials.set_index("material_id").to_dict("index")
     sup_idx = suppliers.set_index("supplier_id").to_dict("index")
+    line_counts = pos["po_no"].value_counts().to_dict()
     cards = []
     for p in pos.itertuples(index=False):
         m = mat_idx.get(p.material_id, {})
@@ -134,11 +158,16 @@ def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
         committed = date.fromisoformat(str(p.committed_date)[:10])
         need = date.fromisoformat(str(p.need_date)[:10])
         buffer_days = (need - committed).days
+        total_lines = line_counts.get(p.po_no, 1)
+        is_split = total_lines > 1
         lines = [
-            f"採購單號：{p.po_no}",
+            f"採購單號：{p.po_no}"
+            + (f"（分批交貨：第 {int(p.sched_line)} 批／共 {total_lines} 批）"
+               if is_split else ""),
             f"料號：{p.material_id}（{m.get('category', '')}）",
             f"供應商：{p.supplier_id} {s.get('supplier_name', '')}",
-            f"採購數量：{int(p.qty)}",
+            f"項次總量：{int(p.qty)}"
+            + (f"（本批數量：{int(p.sched_qty)}）" if is_split else ""),
             f"供應商承諾交期：{committed.isoformat()}",
             f"下游需求日：{need.isoformat()}",
             f"緩衝天數（需求日減承諾日）：{buffer_days} 天",
@@ -148,9 +177,12 @@ def po_cards(pos: pd.DataFrame, materials: pd.DataFrame,
             f"是否有已認證二源：{_yn(m.get('has_qualified_second_source'))}",
             f"是否為瓶頸料：{_yn(m.get('is_bottleneck'))}",
         ]
+        card_id = f"PO:{p.po_no}#{int(p.sched_line)}" if is_split else f"PO:{p.po_no}"
+        title = (f"採購單 {p.po_no}（第 {int(p.sched_line)} 批／共 {total_lines} 批）"
+                if is_split else f"採購單 {p.po_no}")
         cards.append(Card(
-            card_id=f"PO:{p.po_no}", kind="po",
-            title=f"採購單 {p.po_no}", text="\n".join(lines),
+            card_id=card_id, kind="po",
+            title=title, text="\n".join(lines),
             meta={"po_no": p.po_no, "material_id": p.material_id,
                   "supplier_id": p.supplier_id}))
     return cards
@@ -189,7 +221,8 @@ def summary_cards(suppliers: pd.DataFrame, perf: pd.DataFrame | None,
             card_id="SUM:otd_by_supplier_type", kind="summary",
             title="各類供應商的整體準交率",
             text="依供應商類型加權計算之歷史準交率（由差到好）：\n" + "\n".join(
-                f"- {t}：{v:.0%}" for t, v in by_type.items())))
+                f"- {SUPPLIER_TYPE_LABEL_ZH.get(t, t)}（{t}）：{v:.0%}"
+                for t, v in by_type.items())))
 
     single = materials[~materials["has_qualified_second_source"].astype(bool)]
     bottleneck_single = single[single["is_bottleneck"].astype(bool)]

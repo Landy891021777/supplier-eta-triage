@@ -202,6 +202,76 @@ def _detect_reason(text: str) -> str:
     return "not_stated"
 
 
+# --------------------------------------------------------------------------
+# 分批交貨：一封信裡，同一張單講了兩批不同數量／日期
+# --------------------------------------------------------------------------
+# 領域假設：物料企劃最常看到的分批說法是「先出一批、其餘延到某日」。
+# 只取「最晚一筆」等於把準時到的那批當成不存在，明明有一部分可以先投料；
+# 因此改成兩批各自輸出一筆，各帶 qty，供下游依交貨排程行對位。
+#
+# 用「其餘／remaining」這個轉折詞定位第二批，而不是寫死 HC-010 的完整句子，
+# 這樣同時涵蓋「1,000 pcs ship on 10/05, the remaining 500 pcs will follow
+# on 10/26」與「先出 2,000 片，其餘 3,000 片延到 11/15」這類不同寫法。
+REMAINDER_RE = re.compile(
+    r"\bremaining\b|\bthe\s+rest\b|其餘|剩下的?|剩餘", re.IGNORECASE
+)
+QTY_RE = re.compile(
+    r"(\d{1,3}(?:,\d{3})*)\s*(?:pcs\b|pieces\b|units?\b|片|件|支|顆)", re.IGNORECASE
+)
+
+
+def _parse_qty(raw: str) -> int:
+    return int(raw.replace(",", ""))
+
+
+def _find_split_batches(
+    text: str, ref_year: int
+) -> list[tuple[int, date | None, str | None]] | None:
+    """
+    找「先出 A、其餘 B 延到某日」這類句型，回傳兩批的 (數量, 日期, 原文日期字樣)。
+
+    找不到就回傳 None，呼叫端會退回「一張單一筆」的原有行為——
+    這是刻意保守的設計：抓不準就不要硬湊兩筆出來。
+    """
+    m = REMAINDER_RE.search(text)
+    if not m:
+        return None
+    remainder_pos = m.start()
+
+    # 第一批（準時出的那批）：轉折詞之前、離它最近的那個數量。
+    # 取「最靠近」而非「第一個」，是為了避開句首常見的項次總量
+    # （例如「quantity 20 pcs will be split: 8 pcs ...」裡的 20 不是任何一批）。
+    before = text[:remainder_pos]
+    qty1_matches = list(QTY_RE.finditer(before))
+    if not qty1_matches:
+        return None
+    qty1_m = qty1_matches[-1]
+    qty1 = _parse_qty(qty1_m.group(1))
+
+    # 第二批（延後的那批）：轉折詞之後的第一個數量
+    after = text[remainder_pos:]
+    qty2_m = QTY_RE.search(after)
+    if not qty2_m:
+        return None
+    qty2 = _parse_qty(qty2_m.group(1))
+
+    # 第一批的日期：如果信裡有重述（例如「on the original date 2026-09-30」），
+    # 就在「第一批數量」與「轉折詞」之間找；沒有就是 None，不硬猜。
+    seg1 = text[qty1_m.end():remainder_pos]
+    dates1 = _find_dates(seg1, ref_year)
+    date1, raw1 = (dates1[-1][0], dates1[-1][3]) if dates1 else (None, None)
+
+    # 第二批的日期：轉折詞的數量之後一小段範圍內找
+    seg2_start = remainder_pos + qty2_m.end()
+    seg2 = text[seg2_start:seg2_start + 80]
+    dates2 = _find_dates(seg2, ref_year)
+    if not dates2:
+        return None  # 找不到延後日期就不成立為分批，避免亂猜
+    date2, raw2 = dates2[0][0], dates2[0][3]
+
+    return [(qty1, date1, raw1), (qty2, date2, raw2)]
+
+
 def _detect_strength(text: str) -> str:
     """
     承諾強度的規則式判斷。
@@ -239,13 +309,44 @@ def extract(email: dict, ref_year: int = 2026) -> list[ExtractedRecord]:
     reason = _detect_reason(text)
     strength = _detect_strength(text)
 
+    # 分批交貨只在「整封信只講一張單」時才套用——一信多單時「其餘」可能是
+    # 指別張單，硬套會把日期歸屬到錯的單上，寧可退回原本一張單一筆的邏輯。
+    if not multi_po:
+        split_batches = _find_split_batches(text, ref_year)
+        if split_batches:
+            po = next(iter(seen))
+            records = []
+            for i, (qty, d, raw) in enumerate(split_batches):
+                is_last = i == len(split_batches) - 1  # 目前只處理「先準時、後延遲」這個最常見的型態
+                change_type = (ChangeType.DELAY.value if is_last
+                              else ChangeType.NO_CHANGE.value)
+                notes = [f"偵測到分批交貨（{'先出一批、其餘順延' if i == 0 else '其餘順延的那一批'}），"
+                        f"此筆數量 {qty}"]
+                conf = 0.70
+                if d is None:
+                    notes.append("這一批信中未寫明日期")
+                    conf = 0.35
+                if HEDGE_RE.search(text):
+                    conf = min(conf, 0.50)
+                    notes.append("含退路措辭，承諾強度需語意判斷")
+                records.append(ExtractedRecord(
+                    po_no=po, material_id=None,
+                    new_eta=(d.isoformat() if d else None), raw_date_text=raw,
+                    qty=qty, batch_note="分批交貨的其中一批",
+                    commitment_strength=strength,
+                    change_type=change_type, reason_code=reason,
+                    confidence=round(conf, 2), extracted_by="rule",
+                    notes="；".join(notes),
+                ))
+            return records
+
     records: list[ExtractedRecord] = []
     for po, po_at in seen.items():
         no_change = bool(NO_CHANGE_RE.search(text))
 
         # ---- 先試「同列解析」----
         # 供應商的排程變更通知常以表格呈現，每一列自成一筆：
-        #     PO-2026-04390  WF-N7-KL2210  2026-09-25  2026-10-09  Yield excursion
+        #     PO-2026-04390  SW-300-P-2210  2026-09-25  2026-10-09  Yield excursion
         # 當 PO 號與日期出現在同一列時，歸屬是明確的，不存在歧義，
         # 因此可以放心給高信心，不必為了「這封信有多張 PO」就整封升級到 LLM。
         # 這個改進讓表格式通知留在免費的規則層處理 —— 省錢，且結果可重現。

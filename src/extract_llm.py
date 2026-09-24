@@ -95,6 +95,14 @@ def _coerce(rec: dict) -> ExtractedRecord:
     except (TypeError, ValueError):
         conf = 0.5
 
+    # qty：分批交貨才會有這個欄位，模型沒給、給空字串或給不了數字都當成 None——
+    # 寧可讓對位層退回「未指明是哪一批」，也不要把湊出來的數字當真。
+    qty_raw = rec.get("qty")
+    try:
+        qty = int(qty_raw) if qty_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        qty = None
+
     return ExtractedRecord(
         po_no=(str(rec["po_no"]).strip().upper() if rec.get("po_no") else None),
         material_id=None,
@@ -106,6 +114,8 @@ def _coerce(rec: dict) -> ExtractedRecord:
         confidence=max(0.0, min(1.0, conf)),
         extracted_by="llm",
         notes=str(rec.get("notes", ""))[:400],
+        qty=qty,
+        batch_note=str(rec.get("batch_note", "") or "")[:200],
     )
 
 

@@ -37,6 +37,12 @@ from pathlib import Path
 
 import pandas as pd
 
+try:  # 允許以 `python src/build_erp_db.py` 或 `python -m src.build_erp_db` 執行
+    from .domain import CATEGORY_SUPPLIER_TYPE
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from domain import CATEGORY_SUPPLIER_TYPE
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DB_PATH = DATA / "erp_sim.db"
@@ -68,7 +74,9 @@ CREATE TABLE material_master (
     category           TEXT,
     std_lead_time_days INTEGER,
     is_bottleneck      INTEGER DEFAULT 0,
-    criticality        TEXT
+    criticality        TEXT,
+    base_uom           TEXT,     -- ≈ MARA-MEINS 基本計量單位
+    gr_processing_days INTEGER  -- ≈ MARC-WEBAZ 收貨處理時間：到廠後幾天才能投產
 );
 
 -- 替代料關係 (≈ BOM 替代群組 / 主檔替代關係)
@@ -140,7 +148,7 @@ CREATE TABLE po_change_log (
 
 -- 收貨紀錄 (≈ SAP MKPF/MSEG)。實際到料日，也就是「後來到底怎麼了」。
 -- 本程式建立時為空；歷史單據與收貨紀錄由 generate_history.py 另外寫入。
--- 它是供應商準交表現與權重校準的唯一資料來源。
+-- 它是供應商歷史統計、保守到料日估計與時間切分回測的唯一資料來源。
 CREATE TABLE goods_receipt (
     gr_no        TEXT PRIMARY KEY,
     po_no        TEXT NOT NULL,
@@ -179,9 +187,10 @@ def build(verbose: bool = True) -> Path:
               "historical_otd_rate"]].itertuples(index=False, name=None))
 
     con.executemany(
-        "INSERT INTO material_master VALUES (?,?,?,?,?)",
+        "INSERT INTO material_master VALUES (?,?,?,?,?,?,?)",
         [(r.material_id, r.category, int(r.std_lead_time_days),
-          int(bool(r.is_bottleneck)), r.criticality)
+          int(bool(r.is_bottleneck)), r.criticality,
+          r.base_uom, int(r.gr_processing_days))
          for r in mats.itertuples(index=False)])
 
     # 替代料：CSV 裡的空字串在此被正確地「不寫入」，
@@ -197,14 +206,14 @@ def build(verbose: bool = True) -> Path:
     sup_by_type: dict[str, list[str]] = {}
     for r in sups.itertuples(index=False):
         sup_by_type.setdefault(r.supplier_type, []).append(r.supplier_id)
-    type_of_cat = {"WAFER": "FOUNDRY", "MASK": "MASK_SHOP",
-                   "SUBSTRATE": "SUBSTRATE", "ASSEMBLY": "OSAT"}
 
     primary_vendor = (pos.drop_duplicates("material_id")
                       .set_index("material_id")["supplier_id"].to_dict())
     src_rows = []
     for r in mats.itertuples(index=False):
-        cands = sup_by_type.get(type_of_cat.get(r.category, ""), [])
+        # 料別 → 供應商類型的對照只維護在 domain.py 一個地方（見決策 17），
+        # 避免這裡跟 generate_data.py 各寫一份、新增料別時漏改其中一邊。
+        cands = sup_by_type.get(CATEGORY_SUPPLIER_TYPE.get(r.category, ""), [])
         if not cands:
             continue
         first = primary_vendor.get(r.material_id, cands[0])
@@ -219,28 +228,41 @@ def build(verbose: bool = True) -> Path:
     con.executemany("INSERT OR IGNORE INTO source_list VALUES (?,?,?,?)", src_rows)
 
     # ---------------- PR / PO / 排程行 / 變更文件 ----------------
+    # po_master.csv 現在是「每筆交貨排程行一列」（分批交貨時同一張單有多列），
+    # 所以先依 po_no 分組：請購單、單頭、項次都是這張單只該寫一次的東西，
+    # 交貨排程行才是每批各自一列 —— 分組後才不會把 PR／單頭寫重複。
     pr_rows, hdr_rows, item_rows, sched_rows, chg_rows = [], [], [], [], []
-    for i, r in enumerate(pos.itertuples(index=False), start=1):
+    for i, (po_no, group) in enumerate(pos.groupby("po_no", sort=False), start=1):
+        group = group.sort_values("sched_line")
+        first = group.iloc[0]
         pr_no = f"PR-{i:06d}"
-        share = float(r.share_of_period_demand) or 1.0
-        period_qty = max(int(r.qty), int(round(int(r.qty) / share)))
-        pr_rows.append((pr_no, r.material_id, int(r.qty), str(r.need_date),
-                        period_qty, int(bool(r.downstream_scheduled))))
+        qty_total = int(first.qty)
+        # 當期需求量：CSV 把每一批各自的佔比（分子是這一批的數量）存成
+        # share_of_period_demand，分批交貨時要先把各批的佔比加回去，
+        # 才能還原出跟單一排程行時同一條公式（項次總量 ÷ 當期需求量）。
+        total_share = float(group["share_of_period_demand"].sum()) or 1.0
+        period_qty = max(qty_total, int(round(qty_total / total_share)))
+        pr_rows.append((pr_no, first.material_id, qty_total, str(first.need_date),
+                        period_qty, int(bool(first.downstream_scheduled))))
 
-        hdr_rows.append((r.po_no, r.supplier_id, str(r.po_created_date)))
-        item_rows.append((r.po_no, 10, r.material_id, int(r.qty), pr_no))
-        # 單一排程行；分批交貨在此資料結構下是「多筆排程行」，
-        # 屬已知未實作項目（見 README 已知限制）。
-        sched_rows.append((r.po_no, 10, 1, str(r.committed_date), int(r.qty)))
+        hdr_rows.append((po_no, first.supplier_id, str(first.po_created_date)))
+        item_rows.append((po_no, 10, first.material_id, qty_total, pr_no))
+        # 交貨排程行：每一批各自一列 —— 這就是分批交貨的資料結構基礎。
+        for s in group.itertuples(index=False):
+            sched_rows.append((po_no, 10, int(s.sched_line), str(s.committed_date),
+                               int(s.sched_qty)))
 
         # 依 reschedule_count 產生對應筆數的變更文件。
         # 工具之後必須自己 COUNT 這張表，而不是讀一個現成欄位。
-        n = int(r.reschedule_count or 0)
-        committed = date.fromisoformat(str(r.committed_date)[:10])
+        # 領域假設：以第一批（原始承諾日）為錨點合成變更歷程 ——
+        #   改期次數描述的是「這張單談過幾次」，不是哪一批談的，
+        #   選第一批只是要有個確定的日期基準點。
+        n = int(first.reschedule_count or 0)
+        committed = date.fromisoformat(str(first.committed_date)[:10])
         for k in range(n):
             old = committed - timedelta(days=7 * (n - k))
             new = committed - timedelta(days=7 * (n - k - 1))
-            chg_rows.append((r.po_no, 10, "committed_date",
+            chg_rows.append((po_no, 10, "committed_date",
                              old.isoformat(), new.isoformat(),
                              (old - timedelta(days=3)).isoformat(), "VENDOR_EDI"))
 

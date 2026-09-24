@@ -37,12 +37,14 @@ PO_CONTRACT = {
     "po_no": "採購單號",
     "material_id": "料號",
     "supplier_id": "供應商代號",
-    "qty": "採購數量",
-    "committed_date": "供應商承諾交期（推導：交貨排程行中最晚的一筆）",
+    "qty": "項次總數量（分批交貨時，這是全部排程行加起來的量，不是單一批的量）",
+    "sched_line": "交貨排程行序號（推導：交貨排程行本身；分批交貨時同一張單有多列，1 為最早一批）",
+    "sched_qty": "本排程行（這一批）的數量（推導：交貨排程行本身）",
+    "committed_date": "供應商承諾交期（本排程行的承諾日；分批交貨時每一批各自一列、各自一個日期）",
     "need_date": "下游需求日（推導：來自請購單）",
     "downstream_scheduled": "下游是否已排定產能或已對客戶承諾",
     "reschedule_count": "已改期次數（推導：變更文件中承諾日被改的次數）",
-    "share_of_period_demand": "本單數量佔該料號當期需求比例（推導：本單量 ÷ 當期需求量）",
+    "share_of_period_demand": "本批數量佔該料號當期需求比例（推導：本批量 sched_qty ÷ 當期需求量）",
     "po_created_date": "採購單建立日",
 }
 
@@ -54,6 +56,8 @@ MATERIAL_CONTRACT = {
     "has_qualified_second_source": "是否有已認證二源（推導：來源清單中合格供應商是否 ≥ 2 家）",
     "alt_material_id": "替代料號（推導：替代料關係表）",
     "criticality": "關鍵性等級",
+    "base_uom": "基本計量單位",
+    "gr_processing_days": "收貨處理天數（到廠後幾天才能投產；舊版資料庫沒有此欄位時補 0）",
 }
 
 SUPPLIER_CONTRACT = {
