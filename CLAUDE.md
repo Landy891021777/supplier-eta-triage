@@ -22,7 +22,7 @@
 介面：`app.py`（導覽外殼）＋ `ui_state.py`（共用狀態）＋ `views/*.py`（一頁一檔），
 分「企劃工作區」（今日行動清單、物料智能檢索、供應商績效、收貨處理天數、ERP 單據、
 信件與解析軌跡）與「專案說明」（專案簡介與導覽、方法驗證、效益估算）兩區。
-設計取捨的完整紀錄：`docs/設計決策.md`（決策 1–18，決策 19 待寫）。
+設計取捨的完整紀錄：`docs/設計決策.md`（決策 1–19）。
 
 ## 不可違反的原則
 
@@ -103,20 +103,20 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 | Streamlit 重啟後使用者看到舊畫面 | WebSocket 斷線，請使用者 Ctrl+F5 |
 | 提示詞加了「分批交貨」一節，口語敘述信跟著退步 | 改 prompt 要重跑**全部**評估，不是只看新案例；退步照實寫，不拿同一批題目回頭調分數 |
 
-## 目前狀態（2026-09-23）
+## 目前狀態（2026-09-24）
 
-- 分支 `feat/planner-triage`（已推上 GitHub），`main` 還是最舊版本
+- Plan 3 已完成，`feat/planner-triage` 已合併到 `main`（兩者內容相同）
 - **266 項測試通過**，工作區乾淨
 - 首頁（關 LLM 的規則層模式）：52 封信 → 自動濾除 13 → 行動清單 43 → P1 15、P2 13、P3 3、需人工確認 18
 - 首頁（開 LLM、讀種子快取）：自動濾除 9 → 行動清單 47 → P1 21、P2 17、P3 9、需人工確認 20
 - 解析評估：口語敘述信 LLM 日期 0.64、承諾強度 0.27（加分批交貨提示後退步，照實記錄、未回頭調）；誤判為已確認全為 0
-- 檢索評估：知識庫 397 張卡，現行設計 Hit@3 0.92
+- 檢索評估：知識庫 399 張卡，現行設計 Hit@3 0.92
 - 資料：14 家供應商、40 個料號、260 張在途採購單（297 筆交貨排程行，37 張是 ERP 已拆批）、1494 張歷史單
 - 回測（`output/回測結果.md`）：本工具與「只看供應商說的日期」打平；P95 涵蓋率 90%，低於預期
 - GitHub：`https://github.com/Landy891021777/supplier-eta-triage`（私人）
-- 雲端：v2 `https://supplier-eta-triage-v2.streamlit.app/`（部署 `feat/planner-triage`）；v1 部署 `main`，還是舊版
+- 雲端：v1 部署 `main`，合併後會自動變成新版；v2 `https://supplier-eta-triage-v2.streamlit.app/`（部署 `feat/planner-triage`）是臨時的，使用者確認 v1 正常後刪除
 
-## 進行中：Plan 3（`docs/superpowers/plans/2026-09-23-partial-delivery-and-wrapup.md`）
+## 已完成：Plan 3（`docs/superpowers/plans/2026-09-23-partial-delivery-and-wrapup.md`）
 
 | 任務 | 狀態 |
 |---|---|
@@ -125,9 +125,9 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 | 3 對位／分級／畫面／匯出改用排程行 | ✅ |
 | 4 文件全面改寫（README、CLAUDE.md、操作指引、部署指引、ERP 欄位對應） | ✅（解析、檢索的數字留待補標記） |
 | 5 重跑評估與種子快取 | ✅ 零網路驗證通過（0 次呼叫）；口語敘述信 LLM 退步，照實記錄 |
-| **6 決策 19、合併到 `main`、切換公開網址** | **下一步** |
+| 6 決策 19、合併到 `main` | ✅ |
 
-**Task 6 注意**：決策 19 除了分批交貨，也要記下「提示詞加分批一節後口語信退步、決定不回頭調」這件事與被否決的做法（對著評估題調提示詞）。
+**使用者要自己做的事**：確認 v1 網址已是新版後刪掉 v2 App；決定 repo 是否改公開（公開前再確認沒有金鑰）；Google AI Studio 設金鑰用量上限。
 
 ## 新功能候選清單（Plan 3 之後）
 
