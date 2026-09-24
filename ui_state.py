@@ -74,6 +74,11 @@ def sidebar() -> None:
     一頁，放在該頁頂端讓人一眼看到「這個數字只影響這裡」（Plan 2 Task 5
     會正式定案；Task 3 先把它搬到頁面內）。
     """
+    # 側邊欄在任何頁面之前執行，而且下面會讀資料來源——雲端新環境沒有
+    # data/，若等頁面的 context() 才補資料，這裡會先撞上 FileNotFoundError，
+    # 整個 App 打不開（2026-09-24 合併到 main 後真的發生過）。
+    # _ensure_data() 資料已備妥時只做檢查，重複呼叫不會重建。
+    _ensure_data()
     cfg = pipeline.load_config()
     st.sidebar.title("⚙️ 設定")
 
