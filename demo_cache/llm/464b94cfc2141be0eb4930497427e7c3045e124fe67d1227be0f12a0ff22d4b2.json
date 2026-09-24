@@ -1,1 +1,0 @@
-{"text": "{\n  \"records\": [\n    {\n      \"po_no\": \"PO-2026-04417\",\n      \"new_eta\": \"2026-10-29\",\n      \"raw_date_text\": \"10/29 可以出\",\n      \"commitment_strength\": \"confirmed\",\n      \"change_type\": \"delay\",\n      \"reason_code\": \"not_stated\",\n      \"confidence\": 1.0,\n      \"notes\": \"生管已確認為確定日期，原承諾日為 2026-10-15，此為延期交貨\"\n    }\n  ]\n}"}
