@@ -46,7 +46,7 @@
 py -X utf8 src/generate_data.py      # 合成資料、52 封信（含 10 封手寫刁鑽案例）
 py -X utf8 src/build_erp_db.py       # data/erp_sim.db
 py -X utf8 src/generate_history.py   # 1494 張歷史單與收貨紀錄（冪等）
-LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 266 項，全部離線
+LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 267 項，全部離線
 py -X utf8 -m streamlit run app.py --server.port 8511
 ```
 
@@ -68,7 +68,7 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 | `triage.py` 的分級、`generate_history.py`、`config.yaml` 的 `triage`／`receiving` | 重跑 `backtest.py`，同步 README「回測」 |
 | 任何功能 | 在 `docs/設計決策.md` 新增一條決策（含被否決的替代方案） |
 
-驗證種子快取有效的方式：複製一份不含 `.cache/`、`data/` 的乾淨副本，把 `requests.post/get` 換成會拋錯的函式，跑主流程＋語意索引＋範例問答，網路呼叫必須為 0。**複製目錄要用短路徑**（例如 `C:/Users/User/AppData/Local/Temp/claude/cs`），scratchpad 路徑本身就超過 250 字元，會撞 Windows MAX_PATH。
+驗證種子快取有效的方式：複製一份不含 `.cache/`、`data/` 的乾淨副本，**先直接打開 App 讓它自己補資料**（不要手動跑產生器，否則驗不到冷啟動），再把 `requests.post/get` 換成會拋錯的函式，跑主流程＋語意索引＋範例問答，網路呼叫必須為 0。**複製目錄要用短路徑**（例如 `C:/Users/User/AppData/Local/Temp/claude/cs`），scratchpad 路徑本身就超過 250 字元，會撞 Windows MAX_PATH。
 
 ## 程式慣例
 
@@ -93,6 +93,7 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 | `itertuples` 把含括號的中文欄名改成 `_3` | 先 rename 成英文欄名再迭代 |
 | 產生器重跑灌水 | 產生器必須冪等（先清掉自己的舊產出） |
 | 雲端首次載入整個打不開 | 兩個工作階段搶著建資料：要上鎖，且「備妥」要看**內容**不是檔案存在（`src/bootstrap.py`） |
+| 合併後 v1 網址 FileNotFoundError | 側邊欄在任何頁面之前就讀資料，補資料卻在頁面裡才跑。**任何讀資料的地方都要先 `_ensure_data()`**；驗證冷啟動要用**沒有 data/** 的副本打開 App（`test_cold_start_home_page_opens_without_data`），不是先手動產生資料 |
 | 全域把「生管」換成「物料企劃」 | 改壞了 prompt 裡引用**供應商那邊生管**的例句。全域改字前先看每一處的語意 |
 | 報告寫死結論句 | 「涵蓋率沒有偏離預期」在新資料上變成不實陳述。結論要依數字產生（`backtest.coverage_verdict`） |
 | 歷史單數量沒依料別 | 出現「光罩一次買 8000 片」；數量、前置期、下單日都要依料別 |
@@ -106,7 +107,7 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 ## 目前狀態（2026-09-24）
 
 - Plan 3 已完成，`feat/planner-triage` 已合併到 `main`（兩者內容相同）
-- **266 項測試通過**，工作區乾淨
+- **267 項測試通過**，工作區乾淨
 - 首頁（關 LLM 的規則層模式）：52 封信 → 自動濾除 13 → 行動清單 43 → P1 15、P2 13、P3 3、需人工確認 18
 - 首頁（開 LLM、讀種子快取）：自動濾除 9 → 行動清單 47 → P1 21、P2 17、P3 9、需人工確認 20
 - 解析評估：口語敘述信 LLM 日期 0.64、承諾強度 0.27（加分批交貨提示後退步，照實記錄、未回頭調）；誤判為已確認全為 0

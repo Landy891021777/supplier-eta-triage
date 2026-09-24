@@ -172,3 +172,49 @@ def test_old_format_data_is_rebuilt_not_silently_used(tmp_path):
 
     assert f.calls == {"data": 1, "db": 1, "history": 1}
     assert _state(f) == (True, True)
+
+
+# ---------------------------------------------------------------------------
+# 端到端：全新環境（沒有 data/）打開首頁
+# ---------------------------------------------------------------------------
+_COPY_IGNORE = (".git", ".cache", "data", ".env", "__pycache__", ".pytest_cache",
+                "demo_cache", "面試防彈說法.md")
+
+
+def test_cold_start_home_page_opens_without_data(tmp_path):
+    """
+    雲端新環境沒有 data/（被 .gitignore 排除），首頁必須自己補齊資料後打開。
+
+    當初的 bug（2026-09-24，合併到 main 後 v1 網址整個打不開）：介面拆成
+    views/ 之後，app.py 在任何頁面之前先呼叫 ui_state.sidebar()，側邊欄
+    一開始就去讀資料來源，而補資料的 _ensure_data() 要等頁面呼叫 context()
+    才會跑 —— 於是 SqliteSource 直接報 FileNotFoundError。
+    其他測試都在 data/ 已經存在的環境跑，零網路驗證也是先手動產生資料，
+    所以一路都沒抓到。
+
+    用子行程跑在一份乾淨副本上：同一個行程裡 import 過的模組會指回真正的
+    專案目錄（那裡 data/ 已經存在），測試就會假性通過。
+    """
+    import os
+    import shutil
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    copy = tmp_path / "app"
+    shutil.copytree(root, copy, ignore=shutil.ignore_patterns(*_COPY_IGNORE))
+    assert not (copy / "data").exists()
+
+    script = (
+        "from streamlit.testing.v1 import AppTest\n"
+        "at = AppTest.from_file('app.py', default_timeout=600).run()\n"
+        "print('EXC:' + ' | '.join(str(getattr(e, 'message', e))[:300] for e in at.exception))\n"
+    )
+    env = {**os.environ, "LLM_PROVIDER": "none", "PYTHONIOENCODING": "utf-8"}
+    proc = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=copy,
+                          env=env, capture_output=True, text=True, encoding="utf-8",
+                          timeout=900)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out[-2000:]
+    exc_line = next((l for l in proc.stdout.splitlines() if l.startswith("EXC:")), None)
+    assert exc_line == "EXC:", out[-2000:]
+    assert (copy / "data" / "erp_sim.db").exists()

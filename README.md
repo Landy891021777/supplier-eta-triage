@@ -238,7 +238,7 @@ pip install -r requirements.txt
 python src/generate_data.py        # 合成資料與 52 封模擬信件（含 10 封手寫刁鑽案例）
 python src/build_erp_db.py         # 模擬 ERP 資料庫 data/erp_sim.db
 python src/generate_history.py     # 1494 張歷史單與收貨紀錄
-python -m pytest tests -q          # 266 項測試，全部離線
+python -m pytest tests -q          # 267 項測試，全部離線
 python -m streamlit run app.py     # 啟動介面
 ```
 
@@ -310,7 +310,7 @@ src/
 scripts/export_demo_cache.py   匯出部署用種子快取
 demo_cache/                    部署用種子快取
 output/                        評估報告（回測、解析、檢索）
-tests/                         266 項測試
+tests/                         267 項測試
 docs/
   操作指引.md                  給物料企劃的使用說明
   設計決策.md                  每個設計取捨與被否決的方案
