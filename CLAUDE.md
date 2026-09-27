@@ -46,7 +46,7 @@
 py -X utf8 src/generate_data.py      # 合成資料、52 封信（含 10 封手寫刁鑽案例）
 py -X utf8 src/build_erp_db.py       # data/erp_sim.db
 py -X utf8 src/generate_history.py   # 1494 張歷史單與收貨紀錄（冪等）
-LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 267 項，全部離線
+LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 269 項，全部離線
 py -X utf8 -m streamlit run app.py --server.port 8511
 ```
 
@@ -94,6 +94,8 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 | 產生器重跑灌水 | 產生器必須冪等（先清掉自己的舊產出） |
 | 雲端首次載入整個打不開 | 兩個工作階段搶著建資料：要上鎖，且「備妥」要看**內容**不是檔案存在（`src/bootstrap.py`） |
 | 合併後 v1 網址 FileNotFoundError | 側邊欄在任何頁面之前就讀資料，補資料卻在頁面裡才跑。**任何讀資料的地方都要先 `_ensure_data()`**；驗證冷啟動要用**沒有 data/** 的副本打開 App（`test_cold_start_home_page_opens_without_data`），不是先手動產生資料 |
+| 雲端 ModuleNotFoundError: openpyxl，首頁與兩頁整個打不開 | 匯出 Excel 用 `engine="openpyxl"`（字串載入，程式裡沒有 import），requirements.txt 漏列；本機早就裝過所以測試全過。`st.download_button` 在畫面繪製時就先產生檔案，所以整頁報錯。**新增依賴一定要進 requirements.txt**（`tests/test_requirements.py` 會掃 import 與 pandas 引擎）；驗證雲端環境要在**只裝 requirements.txt 的全新 venv** 跑，不是本機 |
+| `pip install -r requirements.txt` 在 Windows 報 UnicodeDecodeError | pip 用 cp950 讀檔，requirements.txt 有中文註解就讀不了。此檔只能 ASCII（有測試） |
 | 全域把「生管」換成「物料企劃」 | 改壞了 prompt 裡引用**供應商那邊生管**的例句。全域改字前先看每一處的語意 |
 | 報告寫死結論句 | 「涵蓋率沒有偏離預期」在新資料上變成不實陳述。結論要依數字產生（`backtest.coverage_verdict`） |
 | 歷史單數量沒依料別 | 出現「光罩一次買 8000 片」；數量、前置期、下單日都要依料別 |
@@ -107,7 +109,7 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 ## 目前狀態（2026-09-24）
 
 - Plan 3 已完成，`feat/planner-triage` 已合併到 `main`（兩者內容相同）
-- **267 項測試通過**，工作區乾淨
+- **269 項測試通過**，工作區乾淨
 - 首頁（關 LLM 的規則層模式）：52 封信 → 自動濾除 13 → 行動清單 43 → P1 15、P2 13、P3 3、需人工確認 18
 - 首頁（開 LLM、讀種子快取）：自動濾除 9 → 行動清單 47 → P1 21、P2 17、P3 9、需人工確認 20
 - 解析評估：口語敘述信 LLM 日期 0.64、承諾強度 0.27（加分批交貨提示後退步，照實記錄、未回頭調）；誤判為已確認全為 0
