@@ -46,7 +46,7 @@
 py -X utf8 src/generate_data.py      # 合成資料、52 封信（含 10 封手寫刁鑽案例）
 py -X utf8 src/build_erp_db.py       # data/erp_sim.db
 py -X utf8 src/generate_history.py   # 1494 張歷史單與收貨紀錄（冪等）
-LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 269 項，全部離線
+LLM_PROVIDER=none py -X utf8 -m pytest tests -q    # 270 項，全部離線
 py -X utf8 -m streamlit run app.py --server.port 8511
 ```
 
@@ -109,7 +109,7 @@ LLM_PROVIDER=none py -X utf8 src/backtest.py   # 回測（不需金鑰）
 ## 目前狀態（2026-09-24）
 
 - Plan 3 已完成，`feat/planner-triage` 已合併到 `main`（兩者內容相同）
-- **269 項測試通過**，工作區乾淨
+- **270 項測試通過**，工作區乾淨
 - 首頁（關 LLM 的規則層模式）：52 封信 → 自動濾除 13 → 行動清單 43 → P1 15、P2 13、P3 3、需人工確認 18
 - 首頁（開 LLM、讀種子快取）：自動濾除 9 → 行動清單 47 → P1 21、P2 17、P3 9、需人工確認 20
 - 解析評估：口語敘述信 LLM 日期 0.64、承諾強度 0.27（加分批交貨提示後退步，照實記錄、未回頭調）；誤判為已確認全為 0
